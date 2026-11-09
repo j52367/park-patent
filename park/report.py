@@ -183,6 +183,17 @@ def build(analysis_dir: str | Path, title: str | None = None) -> tuple[Path, lis
         notes_html = md_to_html(filled)
 
     basis_label = "유효특허(선별 완료)" if meta["basis"] == "valid" else "전체 후보 (아직 선별 전)"
+    coverage_html = ""
+    if meta.get("n_unscreened"):
+        coverage_html = (f"<p class=\"notice\"><b>선별 범위:</b> 후보 {meta['n_candidates']:,}건 중 "
+                         f"{meta.get('n_screened', 0):,}건을 선별했고 {meta['n_unscreened']:,}건은 선별하지 않았습니다. "
+                         "아래 수치는 선별한 문헌만 셉니다.")
+        if meta.get("tail_sample"):
+            coverage_html += (f" 미선별 구간에서 무작위로 {meta['tail_sample']}건을 뽑아 본 결과 {meta['tail_valid']}건이 유효였으므로, "
+                              f"미선별 문헌 중 유효특허는 약 {meta['tail_est_valid']:,}건"
+                              f"(95% 신뢰구간 {meta['tail_est_low']:,}–{meta['tail_est_high']:,}건)으로 추정됩니다. "
+                              "추세·순위 해석에 이 누락을 감안하세요.")
+        coverage_html += "</p>"
     kpis = [
         (f"{meta['n_counted']:,}", f"집계 대상 건수 · {basis_label}"),
         (f"{meta['n_candidates']:,}", "검색된 후보 건수"),
@@ -208,6 +219,7 @@ def build(analysis_dir: str | Path, title: str | None = None) -> tuple[Path, lis
 <p class="notice"><b>검토 의견 초안이며 법률 의견이 아닙니다.</b> 이 보고서는 아래 '검색 범위'에 적힌 데이터베이스·기간·검색식 안의 문헌만 다룹니다.
 범위 밖 문헌(해외 특허, 논문, 제품 공개 등)은 반영되지 않았으므로 신규성·진보성이나 공백기술을 단정하는 근거로 쓸 수 없습니다.
 출원 후 약 18개월 안의 출원({escape(meta['unpublished_cutoff'])} 이후)은 아직 공개되지 않은 것이 많아 실제보다 적게 집계됩니다.</p>
+{coverage_html}
 <div class="kpis">{"".join(f'<div class="kpi"><b>{escape(v)}</b><span>{escape(k)}</span></div>' for v, k in kpis)}</div>
 {('<h2>분석 요약</h2>' + notes_html) if notes_html else ''}
 <h2>출원 동향</h2>

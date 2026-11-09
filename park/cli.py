@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import date, datetime
 from pathlib import Path
+
+import pandas as pd
 
 from . import __version__
 from . import charts, checks, ingest as ING, report, stats
@@ -187,8 +190,21 @@ def cmd_map(a):
 
 
 def _doc_block(r) -> str:
+    claims = str(r.get("independent_claims", "") or "").strip()
     return (f"### {r['application_no']}\n- 명칭: {r['title']}\n- 출원인: {r['applicants']}\n"
-            f"- IPC: {r['ipc']}\n- 출원일: {r['application_date']} · 상태: {r['status']}\n- 요약: {r['abstract']}\n")
+            f"- IPC: {r['ipc']}\n- 출원일: {r['application_date']} · 상태: {r['status']}\n- 요약: {r['abstract']}\n"
+            + (f"- 독립청구항: {claims[:1500]}\n" if claims else ""))
+
+
+def _ranked(d: Path, cand):
+    """Candidates in rank order when rank.csv exists (unranked ones last), else file order."""
+    rp = d / "rank.csv"
+    if not rp.exists():
+        return cand
+    r = read_csv(rp)[["application_no", "rank"]]
+    out = cand.merge(r, on="application_no", how="left")
+    out["_r"] = pd.to_numeric(out["rank"], errors="coerce").fillna(10 ** 9)
+    return out.sort_values("_r", kind="stable").drop(columns=["_r"])
 
 
 def cmd_batches(a):
@@ -204,18 +220,35 @@ def cmd_batches(a):
                     done.add(str(json.loads(line).get("application_no", "")))
     if screen is not None:
         done |= set(screen["application_no"])
-    todo = cand[~cand["application_no"].isin(done)]
+    cand = _ranked(d, cand)
+    if a.recheck_codes:
+        # re-judge documents already judged valid under codes whose definition changed
+        if screen is None:
+            raise UserError("--recheck-codes needs screening.csv")
+        codes = {c.strip() for c in a.recheck_codes.split(",") if c.strip()}
+        ids = set(screen[(screen["relevance"] == "valid") & screen["tech_code"].isin(codes)]["application_no"])
+        todo = cand[cand["application_no"].isin(ids)]
+    else:
+        if a.top:
+            if "rank" not in cand.columns:
+                raise UserError("--top needs rank.csv — run `park rank` first")
+            cand = cand[pd.to_numeric(cand["rank"], errors="coerce") <= a.top]
+        todo = cand[~cand["application_no"].isin(done)]
+    prefix = a.prefix
+    if (d / "screening" / "done").exists() and any((d / "screening" / "done").glob(f"{prefix}_*.jsonl")) and not a.force:
+        raise UserError(f"screening/done already has {prefix}_*.jsonl — use a new --prefix (e.g. r2) so results are not overwritten")
     tdir = d / "screening" / "todo"
     tdir.mkdir(parents=True, exist_ok=True)
-    for old in tdir.glob("batch_*.md"):
+    for old in tdir.glob(f"{prefix}_*.md"):
         old.unlink()
     n = 0
     for i in range(0, len(todo), a.size):
         n += 1
         part = todo.iloc[i:i + a.size]
-        body = f"# batch_{n:03d} — {len(part)}건\n\n" + "\n".join(_doc_block(r) for _, r in part.iterrows())
-        (tdir / f"batch_{n:03d}.md").write_text(body, encoding="utf-8")
-    print(f"{len(todo)} unscreened of {len(cand)} -> {n} batches in {tdir}")
+        body = f"# {prefix}_{n:03d} — {len(part)}건\n\n" + "\n".join(_doc_block(r) for _, r in part.iterrows())
+        (tdir / f"{prefix}_{n:03d}.md").write_text(body, encoding="utf-8")
+    what = "to re-check" if a.recheck_codes else "unscreened"
+    print(f"{len(todo)} {what} of {len(cand)} -> {n} batches {prefix}_###.md in {tdir}")
 
 
 def cmd_merge_screening(a):
@@ -224,7 +257,9 @@ def cmd_merge_screening(a):
 
     d = Path(a.dir)
     rows = []
-    for f in sorted((d / "screening" / "done").glob("*.jsonl")):
+    # newer files win: a re-check written later overrides the first judgement whatever its name
+    files = sorted((d / "screening" / "done").glob("*.jsonl"), key=lambda f: (f.stat().st_mtime, f.name))
+    for f in files:
         for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
             if not line.strip():
                 continue
@@ -239,8 +274,16 @@ def cmd_merge_screening(a):
     if (d / "screening.csv").exists():
         old = read_csv(d / "screening.csv")
         new = pd.concat([old, new], ignore_index=True)
+    # a document drawn into a tail sample stays part of that sample after it is re-judged
+    tags = {}
+    for no, by in zip(new["application_no"], new["screened_by"]):
+        m = re.search(r"tail-audit(?:-r\d+)?", str(by))
+        if m:
+            tags.setdefault(no, m.group(0))
     # last judgement for an application wins (re-screening overrides)
-    new = new.drop_duplicates(subset="application_no", keep="last")
+    new = new.drop_duplicates(subset="application_no", keep="last").copy()
+    new["screened_by"] = [b if ("tail-audit" in str(b) or n not in tags) else f"{b}:{tags[n]}"
+                          for n, b in zip(new["application_no"], new["screened_by"])]
     write_csv(conform(new, SCREENING_COLUMNS), d / "screening.csv")
     print(f"screening.csv: {len(new)} rows")
     return cmd_check(argparse.Namespace(dir=a.dir, max_errors=30))
@@ -250,6 +293,25 @@ def cmd_audit_sample(a):
     """Random sample of noise-labelled docs for an independent second look (false-negative check)."""
     d = Path(a.dir)
     cand, screen = _load(d)
+    if a.unscreened or a.below_rank:
+        screened = set(screen["application_no"]) if screen is not None else set()
+        rest = cand[~cand["application_no"].isin(screened)]
+        if a.below_rank:
+            rest = _ranked(d, rest)
+            rest = rest[pd.to_numeric(rest["rank"], errors="coerce").fillna(10 ** 9) > a.below_rank]
+        k = min(a.n, len(rest))
+        sample = rest.sample(n=k, random_state=a.seed) if k else rest
+        tdir = d / "screening" / "todo"
+        tdir.mkdir(parents=True, exist_ok=True)
+        tag = "tail-audit" if a.round <= 1 else f"tail-audit-r{a.round}"
+        name = "tail_audit" if a.round <= 1 else f"tail_audit_r{a.round}"
+        body = (f"# {name} — 미선별 {len(rest)}건 중 무작위 {k}건 (seed {a.seed})\n\n"
+                f"다른 배치와 똑같이 판정하세요. screened_by 뒤에 ':{tag}'를 붙입니다.\n"
+                f"추정 미선별 유효 건수 = (이 표본의 유효 수 / {k}) × {len(rest)}\n\n"
+                + "\n".join(_doc_block(r) for _, r in sample.iterrows()))
+        (tdir / f"{name}.md").write_text(body, encoding="utf-8")
+        print(f"wrote {tdir / (name + '.md')} ({k} of {len(rest)} unscreened docs)")
+        return 0
     if screen is None:
         print("no screening.csv yet")
         return 1
@@ -266,6 +328,19 @@ def cmd_audit_sample(a):
             + "\n".join(_doc_block(r) for _, r in rows.iterrows()))
     (d / "AUDIT_SAMPLE.md").write_text(body, encoding="utf-8")
     print(f"wrote {d / 'AUDIT_SAMPLE.md'} ({k} docs)")
+
+
+def cmd_rank(a):
+    from . import rank as R
+
+    d = Path(a.dir)
+    cand, _ = _load(d)
+    tt = d / "TECH_TREE.md"
+    if not tt.exists():
+        raise UserError(f"{tt} not found — rank needs the technology classification table")
+    r = R.rank(cand, tt.read_text(encoding="utf-8"), a.terms)
+    write_csv(r, d / "rank.csv")
+    print(f"ranked {len(r)} candidates -> {d / 'rank.csv'} (top score {r['rank_score'].iloc[0]:.3f})")
 
 
 def cmd_check(a):
@@ -385,16 +460,29 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("batches", help="split unscreened candidates into Markdown batches")
     s.add_argument("dir")
     s.add_argument("--size", type=int, default=40)
+    s.add_argument("--top", type=int, default=0, help="only candidates ranked within the top N (needs rank.csv)")
+    s.add_argument("--prefix", default="batch", help="batch file prefix; use a new one per screening round (r2, recheck...)")
+    s.add_argument("--recheck-codes", default="", help="re-judge docs already valid under these codes, e.g. C1,W1,W2")
+    s.add_argument("--force", action="store_true", help="allow a prefix that already has results")
     s.set_defaults(fn=cmd_batches)
 
     s = sub.add_parser("merge-screening", help="merge screening/done/*.jsonl into screening.csv and check it")
     s.add_argument("dir")
     s.set_defaults(fn=cmd_merge_screening)
 
+    s = sub.add_parser("rank", help="pre-rank candidates by similarity to TECH_TREE.md (screen in this order)")
+    s.add_argument("dir")
+    s.add_argument("--terms", default="", help="extra keywords that describe the target technology")
+    s.set_defaults(fn=cmd_rank)
+
     s = sub.add_parser("audit-sample", help="sample noise-labelled docs for a false-negative re-check")
     s.add_argument("dir")
     s.add_argument("--n", type=int, default=30)
     s.add_argument("--seed", type=int, default=42)
+    s.add_argument("--unscreened", action="store_true",
+                   help="sample docs never screened (e.g. below the --top cut) to estimate what the cut missed")
+    s.add_argument("--below-rank", type=int, default=0, help="with rank.csv: sample only unscreened docs ranked below N")
+    s.add_argument("--round", type=int, default=1, help="tail sample round; only the latest round is used for estimates")
     s.set_defaults(fn=cmd_audit_sample)
 
     s = sub.add_parser("check", help="validate screening evidence and report numbers")

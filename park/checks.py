@@ -135,7 +135,9 @@ def check_screening(candidates: pd.DataFrame, screening: pd.DataFrame, tech_tree
             elif r["relevance"] != "undecided":
                 res.errors.append(f"{where}: no evidence_quote — judgements without evidence are not allowed")
             continue
-        if len(quote) < MIN_QUOTE_CHARS:
+        whole_title = ("명칭" in str(r.get("evidence_location", "")) and
+                       quote == _squash(by_no.loc[r["application_no"]].get("title", "")))
+        if len(quote) < MIN_QUOTE_CHARS and not whole_title:  # a short title quoted in full is fine
             res.errors.append(f"{where}: evidence_quote too short to be evidence (<{MIN_QUOTE_CHARS} chars)")
             continue
         haystack, why = _source_text(by_no.loc[r["application_no"]], r.get("evidence_location", ""),

@@ -20,6 +20,47 @@ UNPUBLISHED_MONTHS = 18
 COUNTRY_ORDER = ["KR", "US", "JP", "CN", "EP", "WO"]
 
 
+def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
+    """95% Wilson interval for a proportion k/n."""
+    if n == 0:
+        return 0.0, 0.0
+    p = k / n
+    den = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / den
+    half = z * ((p * (1 - p) / n + z * z / (4 * n * n)) ** 0.5) / den
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def coverage(candidates: pd.DataFrame, screening: pd.DataFrame | None) -> dict:
+    """How much of the candidate set was screened, and what the tail sample says about the rest.
+
+    Tail-audit rows (screened_by contains 'tail-audit') are a random sample of documents below the
+    screening cut; their valid share, scaled to the documents still unscreened, estimates how many
+    relevant documents the counts in this report do not include.
+    """
+    if screening is None or screening.empty:
+        return {"n_screened": 0, "n_unscreened": int(len(candidates))}
+    screened = set(screening["application_no"])
+    n_uns = int((~candidates["application_no"].isin(screened)).sum())
+    out = {"n_screened": int(len(screened & set(candidates["application_no"]))), "n_unscreened": n_uns}
+    tail = screening[screening["screened_by"].astype(str).str.contains("tail-audit")] \
+        if "screened_by" in screening else screening.iloc[0:0]
+    if len(tail):
+        # only the latest round describes the documents that are still unscreened
+        rounds = tail["screened_by"].astype(str).str.extract(r"tail-audit(?:-r(\d+))?")[0].fillna("1").astype(int)
+        tail = tail[rounds == rounds.max()]
+        out["tail_round"] = int(rounds.max())
+    if len(tail):
+        k, n = int((tail["relevance"] == "valid").sum()), int(len(tail))
+        lo, hi = wilson(k, n)
+        # the sample was drawn from (unscreened + sample) documents
+        frame = n_uns + n
+        out.update({"tail_sample": n, "tail_valid": k,
+                    "tail_est_valid": round(k / n * n_uns), "tail_est_low": round(lo * n_uns),
+                    "tail_est_high": round(hi * n_uns), "tail_frame": frame})
+    return out
+
+
 def _first(seq) -> str:
     return seq[0] if seq else ""
 
@@ -104,6 +145,7 @@ def compute(candidates: pd.DataFrame, screening: pd.DataFrame | None = None, as_
             "unpublished_cutoff": cutoff.isoformat(),
             "n_applicants": len(app_counter),
             "counting": "full counting (each co-applicant +1)",
+            **coverage(candidates, screening),
         },
         "yearly": yearly,
         "applicants_top": applicants_top,

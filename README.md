@@ -65,7 +65,8 @@ Claude Code에서:
 | `park ingest <files> --out <dir>` | CSV/엑셀 반입 (한글 헤더 자동 인식) |
 | `park search --word "<식>" --out <dir>` | KIPRIS 검색 (`--count-only`로 건수만) |
 | `park quota` | 이번 달 API 호출 수 |
-| `park batches` / `merge-screening` / `audit-sample` | 선별 작업 단위 관리 |
+| `park rank` | 분류표와의 유사도로 후보 정렬 (상위부터 선별) |
+| `park batches` / `merge-screening` / `audit-sample` | 선별 작업 단위, 다시 판정, 꼬리 표본 |
 | `park map <dir>` | 집계(`map/stats.json`)와 SVG 차트 |
 | `park check <dir>` | 인용 검증, 분류 코드 검증, 보고서 숫자 검사 |
 | `park report <dir>` | REPORT.html |
@@ -76,7 +77,10 @@ Claude Code에서:
 - [x] 0단계: CLI, CSV/엑셀 반입, KIPRIS 클라이언트(캐시·쿼터), 특허맵, 근거 검증, 보고서, 합성 데모, MVP 스킬 6종
 - [x] 여러 국가 데이터 반입 (WIPS 등 상용 DB 엑셀): 국가별 건수, 국가 × 연도, 국가 × 기술 분류, 출원인 국적
 - [x] 실제 CPU 과제 데이터(5개국, 사람 판정) 재현: 사람이 만든 국가 × 기술 표와 합계 일치
-- [ ] KIPRIS Plus 실제 검색 (키 사용 기간 연장 대기), 청구항·패밀리·인용 서비스 확인 — [메모](docs/kipris-api-notes.md)
+- [x] KIPRIS Plus 실제 검색: 검색식 문법 확인 ([메모](skills/shared-references/kipris-query-syntax.md)), 한 번에 500건
+- [x] 1단계 실제 주제로 실행 (KR 후보 약 7천 건): 사전 정렬 → 상위 구간 선별 → 꼬리 표본으로 남은 유효 건수 추정 → 보고서
+- [x] 선택 백엔드: Codex CLI 병렬 선별 (`scripts/codex-screen.sh`)
+- [ ] 청구항·패밀리·인용 서비스 연동
 - [ ] 1단계: 실제 과제 1건 완주, 사전 정렬(BM25/임베딩)
 - [ ] 2단계: 핵심특허 전문 검토, 청구항 대비(신규성·진보성·침해), 무효 공방, 전략, 해외 문헌
 - [ ] 3단계: 한국어 특허 검색 모델, KR 무효 근거 벤치마크

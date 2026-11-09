@@ -133,9 +133,10 @@ def test_batches_merge_and_audit(tmp_path):
     rc = main(["merge-screening", str(d)])
     assert rc == 0  # warnings about unscreened rows are not errors
     assert len(read_csv(d / "screening.csv")) == 5
-    main(["batches", str(d), "--size", "400"])  # screened docs are not offered again
-    todo = sorted((d / "screening" / "todo").glob("batch_*.md"))
-    assert [p.name for p in todo] == ["batch_001.md", "batch_002.md"]
+    assert main(["batches", str(d), "--size", "400"]) == 2  # same prefix would overwrite earlier results
+    main(["batches", str(d), "--size", "400", "--prefix", "r2"])  # screened docs are not offered again
+    todo = sorted((d / "screening" / "todo").glob("r2_*.md"))
+    assert [p.name for p in todo] == ["r2_001.md", "r2_002.md"]
     assert "129건" in todo[1].read_text(encoding="utf-8")  # 529 = 400 + 129
     main(["audit-sample", str(d), "--n", "3"])
     assert "3건 / 노이즈 5건" in (d / "AUDIT_SAMPLE.md").read_text(encoding="utf-8")
@@ -154,3 +155,76 @@ def test_map_rerun_removes_stale_charts(tmp_path):
 def test_missing_candidates_is_a_clean_error(tmp_path, capsys):
     assert main(["check", str(tmp_path)]) == 2
     assert "run `park search` or `park ingest` first" in capsys.readouterr().err
+
+
+def test_rank_orders_by_tech_tree_similarity_and_batches_respect_top(tmp_path):
+    from park.rank import rank
+    tree = ("| 코드 | 소분류 | 정의 | 포함 | 제외 |\n|---|---|---|---|---|\n"
+            "| `S1` | 촉각 센서 어레이 | 접촉 압력 분포를 측정 | 촉각 어레이, 압력분포 센서 | 터치스크린 |\n")
+    c = _cand([
+        {"application_no": "1", "title": "커피 머신", "abstract": "원두를 분쇄하여 커피를 추출한다."},
+        {"application_no": "2", "title": "촉각 센서 어레이", "abstract": "압력 분포를 측정하는 촉각 어레이 센서."},
+        {"application_no": "3", "title": "터치스크린 패널", "abstract": "터치스크린의 접촉 좌표를 검출한다."},
+    ])
+    r = rank(c, tree)
+    assert r.iloc[0]["application_no"] == "2" and r.iloc[0]["rank_code"] == "S1"
+    assert list(r["rank"]) == [1, 2, 3]
+    d = tmp_path / "p"
+    d.mkdir()
+    from park.schema import write_csv
+    write_csv(c, d / "candidates.csv")
+    (d / "TECH_TREE.md").write_text(tree, encoding="utf-8")
+    assert main(["rank", str(d)]) == 0
+    assert main(["batches", str(d), "--top", "1", "--size", "10"]) == 0
+    body = (d / "screening" / "todo" / "batch_001.md").read_text(encoding="utf-8")
+    assert "### 2" in body and "### 1\n" not in body
+    assert main(["audit-sample", str(d), "--below-rank", "1", "--n", "5"]) == 0
+    tail = (d / "screening" / "todo" / "tail_audit.md").read_text(encoding="utf-8")
+    assert "### 2" not in tail and "미선별 2건" in tail
+
+
+def test_coverage_estimates_valid_docs_left_below_the_cut():
+    c = _cand([{"application_no": str(i), "application_date": "2020-01-01", "applicants": "A"} for i in range(100)])
+    rows = [{"application_no": str(i), "relevance": "valid", "tech_code": "A1", "screened_by": "codex"} for i in range(10)]
+    rows += [{"application_no": str(10 + i), "relevance": "valid" if i < 5 else "noise", "tech_code": "A1",
+              "screened_by": "codex:tail-audit"} for i in range(10)]
+    s = stats.compute(c, _screen(rows), as_of="2025-01-01")["meta"]
+    assert s["n_screened"] == 20 and s["n_unscreened"] == 80
+    assert s["tail_valid"] == 5 and s["tail_est_valid"] == 40
+    assert s["tail_est_low"] < 40 < s["tail_est_high"]
+
+
+def test_recheck_newest_wins_and_tail_rounds(tmp_path):
+    import os
+    import time
+    d = tmp_path / "p"
+    assert main(["demo", "--out", str(d)]) == 0
+    (d / "screening.csv").unlink()
+    cand = read_csv(d / "candidates.csv")
+    done = d / "screening" / "done"
+    done.mkdir(parents=True)
+    a, b = cand.iloc[0], cand.iloc[1]
+
+    def row(r, rel, code, by):
+        return json.dumps({"application_no": r["application_no"], "relevance": rel, "tech_code": code,
+                           "evidence_level": "provisional", "evidence_location": "요약",
+                           "evidence_quote": r["abstract"][:20], "screened_by": by}, ensure_ascii=False) + "\n"
+
+    (done / "zz_first.jsonl").write_text(row(a, "valid", "A1", "m") + row(b, "valid", "A1", "m:tail-audit"), encoding="utf-8")
+    main(["merge-screening", str(d)])
+    assert main(["batches", str(d), "--recheck-codes", "A1", "--prefix", "recheck"]) == 0
+    assert "2건" in (d / "screening" / "todo" / "recheck_001.md").read_text(encoding="utf-8")
+    time.sleep(0.05)
+    f = done / "aa_recheck.jsonl"  # alphabetically first, but written later → must win
+    f.write_text(row(a, "noise", "", "m2") + row(b, "noise", "", "m2"), encoding="utf-8")
+    os.utime(f, None)
+    main(["merge-screening", str(d)])
+    s = read_csv(d / "screening.csv").set_index("application_no")
+    assert s.loc[a["application_no"], "relevance"] == "noise"
+    assert s.loc[b["application_no"], "screened_by"].endswith(":tail-audit")  # still part of the sample
+    # a later round replaces the earlier one for estimates
+    rows = [{"application_no": str(i), "relevance": "valid", "tech_code": "A1", "screened_by": "x:tail-audit"} for i in range(4)]
+    rows += [{"application_no": str(10 + i), "relevance": "noise", "tech_code": "", "screened_by": "x:tail-audit-r2"} for i in range(4)]
+    c = _cand([{"application_no": str(i), "application_date": "2020-01-01", "applicants": "A"} for i in range(30)])
+    m = stats.compute(c, _screen(rows), as_of="2025-01-01")["meta"]
+    assert m["tail_round"] == 2 and m["tail_valid"] == 0 and m["tail_sample"] == 4
