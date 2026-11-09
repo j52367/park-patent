@@ -34,15 +34,18 @@ PARK is built so those mistakes cannot slip through:
 
 ## Features
 
-| | |
-|---|---|
-| 🔎 **Search & import** | KIPRIS Plus API (cache, monthly call budget, 500 docs per call); spreadsheet import from KIPRIS, WIPS and other DBs (Korean headers, multi-country) |
-| 🧭 **Classification & screening** | Technology tree with definition / include / exclude rules, learned pre-ranking (`park rank --learn`), per-round tail samples |
-| 🗺️ **Patent map** | Filing trend, applicant ranking (name normalisation, nationality), technology matrices, country comparison, growth stage |
-| ⭐ **Key patents** | Claims, forward citations and legal status from KIPRIS → key / notable / ordinary on independent claims, claim quotes verified |
-| 📊 **SWOT & strategy** | Focal applicant vs competitors, rule-based S/W/O/T candidates, strategy proposals |
-| ⚖️ **Claim charts** | Element split → earlier documents (incl. examiner citations) → novelty / inventive-step drafts using description paragraphs |
-| 📄 **Report** | Single HTML file (light/dark) that always shows screening coverage, estimated recall and the disclaimer |
+- 🔎 **Search & import**
+  - KIPRIS Plus API: cache, monthly call budget, 500 docs per call
+  - Spreadsheet import from KIPRIS, WIPS and other DBs: Korean headers, multi-country
+- 🧭 **Classification & screening**
+  - Technology tree with definition / include / exclude rules
+  - Learned pre-ranking (`park rank --learn`)
+  - Per-round tail samples
+- 🗺️ **Patent map:** filing trend, applicant ranking (name normalisation, nationality), technology matrices, country comparison, growth stage
+- ⭐ **Key patents:** claims, forward citations and legal status from KIPRIS, then key / notable / ordinary on independent claims, with verified claim quotes
+- 📊 **SWOT & strategy:** focal applicant vs competitors, rule-based S/W/O/T candidates, strategy proposals
+- ⚖️ **Claim charts:** element split → earlier documents (incl. examiner citations) → novelty / inventive-step drafts using description paragraphs
+- 📄 **Report:** a single HTML file (light/dark) that always shows screening coverage, estimated recall and the disclaimer
 
 No GPU required; the synthetic demo runs without an API key.
 
@@ -70,14 +73,14 @@ Judging can be done by Claude subagents or, optionally, in parallel by the [Code
 git clone https://github.com/j52367/park-patent.git
 cd park-patent
 pip install -e ".[excel,learn,fulltext]"
-park demo                      # full flow on synthetic data, no API key → analysis/demo/REPORT.html
-park install-skills --user     # install the Claude Code skills
+park demo                    # synthetic data, no API key → analysis/demo/REPORT.html
+park install-skills --user   # Claude Code skills
 ```
 
 In Claude Code:
 
 ```text
-/park-pipeline Analyse Korean patents on EV battery thermal management — project:bms-thermal
+/park-pipeline Korean patents on EV battery thermal management — project:bms
 ```
 
 For live data, request the KIPRIS Plus Open API (free, approval required) at [plus.kipris.or.kr](https://plus.kipris.or.kr), put `KIPRIS_API_KEY` in `.env`, and check usage with `park quota` (1,000 calls/month on the free tier).
