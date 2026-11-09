@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "park-patent"
 version = "0.0.1"
-description = "PARK — Patent Analysis Research Kit: Claude Code skills + deterministic tools for Korean patent landscape analysis"
+description = "Evidence-checked Korean patent analysis: landscape reports, key patents, SWOT and claim charts with Claude Code skills and a deterministic CLI"
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
