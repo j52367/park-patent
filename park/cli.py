@@ -1,0 +1,439 @@
+"""`park` command line — the deterministic half of PARK. Skills call these commands."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from datetime import date, datetime
+from pathlib import Path
+
+from . import __version__
+from . import charts, checks, ingest as ING, report, stats
+from .schema import CANDIDATE_COLUMNS, SCREENING_COLUMNS, conform, read_csv, write_csv
+
+TECH_TREE_TEMPLATE = """# 기술 분류표 — <과제명>
+
+코드는 반드시 백틱으로 감싸 첫 칸에 적습니다 (`park check`가 이 칸을 읽습니다).
+
+| 코드 | 대분류 | 중분류 | 정의 | 포함 | 제외 |
+|---|---|---|---|---|---|
+| `A1` | | | | | |
+"""
+
+SEARCH_LOG_TEMPLATE = """# 검색 기록
+
+- **데이터베이스**:
+- **국가**:
+- **기간**:
+- **검색 시각**:
+
+## 검색식과 결과
+"""
+
+
+def _append_log(d: Path, text: str) -> None:
+    p = d / "SEARCH_LOG.md"
+    if not p.exists():
+        p.write_text(SEARCH_LOG_TEMPLATE, encoding="utf-8")
+    with p.open("a", encoding="utf-8") as f:
+        f.write("\n" + text.rstrip() + "\n")
+
+
+class UserError(Exception):
+    """A problem the user can fix; printed without a traceback."""
+
+
+def _load(d: Path):
+    if not (d / "candidates.csv").exists():
+        raise UserError(f"{d / 'candidates.csv'} not found — run `park search` or `park ingest` first")
+    cand = read_csv(d / "candidates.csv")
+    sp = d / "screening.csv"
+    screen = read_csv(sp) if sp.exists() else None
+    return cand, screen
+
+
+def _merge_candidates(d: Path, new_frames, aliases):
+    from .normalize import load_aliases, merge_report
+
+    frames = list(new_frames)
+    if (d / "candidates.csv").exists():
+        frames.insert(0, read_csv(d / "candidates.csv"))
+    cand = ING.finalize(frames, aliases)
+    rep = merge_report(cand["applicants_raw"], load_aliases(aliases))
+    write_csv(rep, d / "applicant_merges.csv")
+    if len(rep):
+        print(f"{len(rep)} applicant names merged from several spellings -> review {d / 'applicant_merges.csv'}")
+    return cand
+
+
+# ---------------- commands ----------------
+def cmd_init(a):
+    d = Path(a.dir)
+    d.mkdir(parents=True, exist_ok=True)
+    for name, body in (("TECH_TREE.md", TECH_TREE_TEMPLATE), ("SEARCH_LOG.md", SEARCH_LOG_TEMPLATE)):
+        if not (d / name).exists():
+            (d / name).write_text(body, encoding="utf-8")
+    print(f"initialised {d}")
+
+
+def cmd_ingest(a):
+    d = Path(a.out)
+    d.mkdir(parents=True, exist_ok=True)
+    frames, lines = [], []
+    for f in a.files:
+        df, mapping = ING.ingest(f, as_of=a.as_of, aliases_path=a.aliases)
+        frames.append(df)
+        lines.append(f"- CSV 반입 `{Path(f).name}`: {len(df):,}행 · 인식한 열 {mapping}")
+        if a.show_mapping:
+            print(f"{f}: {mapping}")
+    before = len(read_csv(d / "candidates.csv")) if (d / "candidates.csv").exists() else 0
+    cand = _merge_candidates(d, frames, a.aliases)
+    write_csv(cand, d / "candidates.csv")
+    _append_log(d, f"### {datetime.now():%Y-%m-%d %H:%M} 반입\n" + "\n".join(lines)
+                + f"\n- candidates.csv: {before:,} → {len(cand):,}건 (중복 제거 후)")
+    print(f"candidates.csv: {before} -> {len(cand)} rows")
+
+
+def cmd_search(a):
+    from .kipris import KiprisClient, KiprisError, items_to_candidates
+
+    d = Path(a.out)
+    d.mkdir(parents=True, exist_ok=True)
+    client = KiprisClient(db_path=a.cache)
+    used_before = client.calls_this_month()
+    if a.count_only:
+        try:
+            total, _ = client.search_page(a.word, 1, 1)
+        except KiprisError as e:
+            print(f"error: {e}", file=sys.stderr)
+            return 2
+        used = client.calls_this_month() - used_before
+        _append_log(d, f"### {datetime.now():%Y-%m-%d %H:%M} 건수 확인\n- 검색식: `{a.word}` → 전체 {total:,}건 (호출 {used}회)")
+        print(f"total={total} new_calls={used} (count only, candidates.csv unchanged)")
+        return 0
+    try:
+        total, items = client.search(a.word, max_docs=a.max, page_size=a.page_size, budget=a.budget)
+    except KiprisError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    new = items_to_candidates(items)
+    before = len(read_csv(d / "candidates.csv")) if (d / "candidates.csv").exists() else 0
+    cand = _merge_candidates(d, [new], a.aliases)
+    write_csv(cand, d / "candidates.csv")
+    used = client.calls_this_month() - used_before
+    _append_log(d, f"### {datetime.now():%Y-%m-%d %H:%M} KIPRIS 검색\n- 검색식: `{a.word}`\n"
+                   f"- 전체 {total:,}건 중 {len(items):,}건 수집 (상한 {a.max:,}) · 실제 API 호출 {used}회\n"
+                   f"- candidates.csv: {before:,} → {len(cand):,}건 (중복 제거 후)")
+    print(f"total={total} fetched={len(items)} new_calls={used} candidates={len(cand)}")
+    if total > len(items):
+        print(f"note: {total - len(items)} results not fetched (raise --max if needed)")
+
+
+def cmd_quota(a):
+    from .kipris import KiprisClient
+    import os
+
+    c = KiprisClient(db_path=a.cache)
+    limit = int(os.environ.get("KIPRIS_MONTHLY_LIMIT", "1000"))
+    used = c.calls_this_month()
+    print(f"KIPRIS calls this month: {used} / {limit}  (remaining {max(limit - used, 0)})")
+
+
+def _short(name: str, n: int) -> str:
+    return name if len(name) <= n else name[: n - 1] + "…"
+
+
+def cmd_map(a):
+    d = Path(a.dir)
+    cand, screen = _load(d)
+    as_of = a.as_of or max([v for v in cand["status_as_of"] if v], default="") or date.today().isoformat()
+    s = stats.compute(cand, screen, as_of=as_of, top_n=a.top)
+    tt = d / "TECH_TREE.md"
+    if tt.exists():
+        s["tech_labels"] = checks.tech_labels(tt.read_text(encoding="utf-8"))
+    m = d / "map"
+    m.mkdir(exist_ok=True)
+    (m / "stats.json").write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+    svgs = {
+        "yearly.svg": charts.bar_by_year(s["yearly"], "연도별 출원"),
+        "applicants.svg": charts.hbar([(_short(r["name"], 28) + (f" ({r['nationality']})" if r.get("nationality") else ""),
+                                        r["count"]) for r in s["applicants_top"]], "주요 출원인", max_label=40),
+        "ipc.svg": charts.hbar([(r["code"], r["count"]) for r in s["ipc_main"]], "IPC 분포"),
+        "growth.svg": charts.growth_path(s["growth"], "기술 성장 단계"),
+    }
+    if len(s.get("country", [])) > 1:
+        svgs["country.svg"] = charts.hbar([(r["country"], r["count"]) for r in s["country"]], "국가별 출원")
+        t = s["country_by_year"]
+        svgs["country_by_year.svg"] = charts.heatmap(t["countries"], t["years"], t["values"], "국가 × 연도")
+        if "country_by_tech" in s:
+            t = s["country_by_tech"]
+            svgs["country_by_tech.svg"] = charts.heatmap(t["countries"], t["codes"], t["values"], "국가 × 기술 분류")
+    if "tech_by_year" in s:
+        t = s["tech_by_year"]
+        svgs["tech_by_year.svg"] = charts.heatmap(t["codes"], t["years"], t["values"], "기술 분류 × 연도")
+        t = s["applicant_by_tech"]
+        svgs["applicant_by_tech.svg"] = charts.heatmap(t["applicants"], t["codes"], t["values"], "출원인 × 기술 분류")
+    # remove charts from earlier runs so the report can never show a stale one
+    for old in ("yearly.svg", "applicants.svg", "ipc.svg", "growth.svg", "tech_by_year.svg", "applicant_by_tech.svg",
+                "country.svg", "country_by_year.svg", "country_by_tech.svg"):
+        (m / old).unlink(missing_ok=True)
+    for name, svg in svgs.items():
+        if svg:
+            (m / name).write_text(svg, encoding="utf-8")
+    meta = s["meta"]
+    print(f"counted {meta['n_counted']} of {meta['n_candidates']} ({meta['basis']}); as_of {meta['as_of']}; "
+          f"unpublished after {meta['unpublished_cutoff']} -> {m}")
+
+
+def _doc_block(r) -> str:
+    return (f"### {r['application_no']}\n- 명칭: {r['title']}\n- 출원인: {r['applicants']}\n"
+            f"- IPC: {r['ipc']}\n- 출원일: {r['application_date']} · 상태: {r['status']}\n- 요약: {r['abstract']}\n")
+
+
+def cmd_batches(a):
+    """Split unscreened candidates into Markdown batches for the screening skill (or subagents)."""
+    d = Path(a.dir)
+    cand, screen = _load(d)
+    done = set()
+    jdir = d / "screening" / "done"
+    if jdir.exists():
+        for f in jdir.glob("*.jsonl"):
+            for line in f.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    done.add(str(json.loads(line).get("application_no", "")))
+    if screen is not None:
+        done |= set(screen["application_no"])
+    todo = cand[~cand["application_no"].isin(done)]
+    tdir = d / "screening" / "todo"
+    tdir.mkdir(parents=True, exist_ok=True)
+    for old in tdir.glob("batch_*.md"):
+        old.unlink()
+    n = 0
+    for i in range(0, len(todo), a.size):
+        n += 1
+        part = todo.iloc[i:i + a.size]
+        body = f"# batch_{n:03d} — {len(part)}건\n\n" + "\n".join(_doc_block(r) for _, r in part.iterrows())
+        (tdir / f"batch_{n:03d}.md").write_text(body, encoding="utf-8")
+    print(f"{len(todo)} unscreened of {len(cand)} -> {n} batches in {tdir}")
+
+
+def cmd_merge_screening(a):
+    """Merge screening/done/*.jsonl (one JSON object per line, SCREENING_COLUMNS keys) into screening.csv."""
+    import pandas as pd
+
+    d = Path(a.dir)
+    rows = []
+    for f in sorted((d / "screening" / "done").glob("*.jsonl")):
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError as e:
+                print(f"  ERROR {f.name}:{n}: invalid JSON ({e})")
+                continue
+            obj["application_no"] = str(obj.get("application_no", ""))
+            rows.append(obj)
+    new = conform(pd.DataFrame(rows), SCREENING_COLUMNS).astype(str).replace({"nan": "", "None": ""})
+    if (d / "screening.csv").exists():
+        old = read_csv(d / "screening.csv")
+        new = pd.concat([old, new], ignore_index=True)
+    # last judgement for an application wins (re-screening overrides)
+    new = new.drop_duplicates(subset="application_no", keep="last")
+    write_csv(conform(new, SCREENING_COLUMNS), d / "screening.csv")
+    print(f"screening.csv: {len(new)} rows")
+    return cmd_check(argparse.Namespace(dir=a.dir, max_errors=30))
+
+
+def cmd_audit_sample(a):
+    """Random sample of noise-labelled docs for an independent second look (false-negative check)."""
+    d = Path(a.dir)
+    cand, screen = _load(d)
+    if screen is None:
+        print("no screening.csv yet")
+        return 1
+    noise = screen[screen["relevance"] == "noise"]
+    n_valid = int((screen["relevance"] == "valid").sum())
+    k = min(a.n, len(noise))
+    sample = noise.sample(n=k, random_state=a.seed) if k else noise
+    rows = cand[cand["application_no"].isin(sample["application_no"])]
+    body = (f"# 노이즈 재검토 표본 — {k}건 / 노이즈 {len(noise)}건 (seed {a.seed})\n\n"
+            "앞선 판정을 보지 말고 TECH_TREE.md만 기준으로 다시 판단하세요.\n\n"
+            "- 노이즈 누락률 r = 유효로 뒤집힌 수 / 표본 수\n"
+            f"- 추정 누락 건수 = r × {len(noise)} (노이즈 전체)\n"
+            f"- 추정 거짓음성률 = 추정 누락 건수 / ({n_valid} + 추정 누락 건수)  ← 유효 판정 {n_valid}건 기준\n\n"
+            + "\n".join(_doc_block(r) for _, r in rows.iterrows()))
+    (d / "AUDIT_SAMPLE.md").write_text(body, encoding="utf-8")
+    print(f"wrote {d / 'AUDIT_SAMPLE.md'} ({k} docs)")
+
+
+def cmd_check(a):
+    d = Path(a.dir)
+    cand, screen = _load(d)
+    failed = False
+    if screen is not None:
+        screen = conform(screen, SCREENING_COLUMNS)
+        tt = d / "TECH_TREE.md"
+        res = checks.check_screening(cand, screen, tt.read_text(encoding="utf-8") if tt.exists() else None,
+                                     checks.load_fulltext(d))
+        print(f"screening: {res.stats}")
+        for w in res.warnings:
+            print(f"  warning: {w}")
+        for e in res.errors[: a.max_errors]:
+            print(f"  ERROR: {e}")
+        if len(res.errors) > a.max_errors:
+            print(f"  ... {len(res.errors) - a.max_errors} more errors")
+        failed |= not res.ok
+    else:
+        print("screening: none yet")
+    notes = d / "REPORT_NOTES.md"
+    if notes.exists():
+        hits = checks.lint_numbers(notes.read_text(encoding="utf-8"))
+        for h in hits:
+            print(f"  REPORT_NOTES {h}")
+        failed |= bool(hits)
+    print("OK" if not failed else "FAILED")
+    return 1 if failed else 0
+
+
+def cmd_report(a):
+    out, problems = report.build(a.dir, a.title)
+    for p in problems:
+        print(f"  problem: {p}")
+    print(f"wrote {out}")
+    return 1 if (problems and a.strict) else 0
+
+
+def cmd_install_skills(a):
+    """Copy skills/ (each skill + shared-references) into a Claude Code skills directory."""
+    import shutil
+
+    src = Path(__file__).resolve().parent.parent / "skills"
+    if not src.exists():
+        print(f"skills folder not found next to the package ({src}); run from a git checkout", file=sys.stderr)
+        return 2
+    dest = Path.home() / ".claude" / "skills" if a.user else Path(a.project) / ".claude" / "skills"
+    dest.mkdir(parents=True, exist_ok=True)
+    for item in sorted(src.iterdir()):
+        if item.is_dir():
+            target = dest / item.name
+            if target.exists():
+                if not a.force:
+                    print(f"skip {target} (exists; use --force to overwrite)")
+                    continue
+                shutil.rmtree(target)
+            shutil.copytree(item, target)
+            print(f"installed {target}")
+    return 0
+
+
+def cmd_demo(a):
+    from . import demo
+
+    d = demo.write_project(a.out)
+    print(f"[1/4] synthetic project -> {d}")
+    cmd_map(argparse.Namespace(dir=str(d), as_of=demo.AS_OF, top=10))
+    print("[2/4] map done")
+    rc = cmd_check(argparse.Namespace(dir=str(d), max_errors=20))
+    print("[3/4] checks", "passed" if rc == 0 else "FAILED")
+    out, problems = report.build(d, "배터리 관리 시스템(BMS) 특허 동향 — 합성 데모")
+    for p in problems:
+        print(f"  problem: {p}")
+    print(f"[4/4] report -> {out}")
+    return 1 if (rc or problems) else 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="park", description="PARK — Patent Analysis Research Kit (deterministic tools)")
+    p.add_argument("--version", action="version", version=f"park {__version__}")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("init", help="create an analysis directory with templates")
+    s.add_argument("dir")
+    s.set_defaults(fn=cmd_init)
+
+    s = sub.add_parser("ingest", help="import CSV/Excel patent lists into candidates.csv")
+    s.add_argument("files", nargs="+")
+    s.add_argument("--out", required=True, help="analysis directory")
+    s.add_argument("--as-of", default="", help="date the status column was observed (YYYY-MM-DD)")
+    s.add_argument("--aliases", default=None, help="aliases.csv (alias,canonical) for applicant names")
+    s.add_argument("--show-mapping", action="store_true")
+    s.set_defaults(fn=cmd_ingest)
+
+    s = sub.add_parser("search", help="KIPRIS Plus search into candidates.csv (cached, call-counted)")
+    s.add_argument("--word", required=True, help="KIPRIS free-search expression, e.g. 'IPC=[G06N] * AD=[20190101~20191231]'")
+    s.add_argument("--out", required=True)
+    s.add_argument("--max", type=int, default=500)
+    s.add_argument("--page-size", type=int, default=100)
+    s.add_argument("--budget", type=int, default=None, help="max API calls for this search")
+    s.add_argument("--count-only", action="store_true", help="1 call: report the total hit count, write nothing")
+    s.add_argument("--aliases", default=None)
+    s.add_argument("--cache", default=".park/kipris_cache.sqlite")
+    s.set_defaults(fn=cmd_search)
+
+    s = sub.add_parser("quota", help="KIPRIS calls used this month")
+    s.add_argument("--cache", default=".park/kipris_cache.sqlite")
+    s.set_defaults(fn=cmd_quota)
+
+    s = sub.add_parser("map", help="compute stats.json and SVG charts")
+    s.add_argument("dir")
+    s.add_argument("--as-of", default="")
+    s.add_argument("--top", type=int, default=15)
+    s.set_defaults(fn=cmd_map)
+
+    s = sub.add_parser("batches", help="split unscreened candidates into Markdown batches")
+    s.add_argument("dir")
+    s.add_argument("--size", type=int, default=40)
+    s.set_defaults(fn=cmd_batches)
+
+    s = sub.add_parser("merge-screening", help="merge screening/done/*.jsonl into screening.csv and check it")
+    s.add_argument("dir")
+    s.set_defaults(fn=cmd_merge_screening)
+
+    s = sub.add_parser("audit-sample", help="sample noise-labelled docs for a false-negative re-check")
+    s.add_argument("dir")
+    s.add_argument("--n", type=int, default=30)
+    s.add_argument("--seed", type=int, default=42)
+    s.set_defaults(fn=cmd_audit_sample)
+
+    s = sub.add_parser("check", help="validate screening evidence and report numbers")
+    s.add_argument("dir")
+    s.add_argument("--max-errors", type=int, default=30)
+    s.set_defaults(fn=cmd_check)
+
+    s = sub.add_parser("report", help="build REPORT.html")
+    s.add_argument("dir")
+    s.add_argument("--title", default=None)
+    s.add_argument("--strict", action="store_true", help="exit 1 if placeholders or typed numbers are found")
+    s.set_defaults(fn=cmd_report)
+
+    s = sub.add_parser("install-skills", help="copy PARK skills into .claude/skills")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--user", action="store_true", help="~/.claude/skills (all projects)")
+    g.add_argument("--project", default=".", help="<project>/.claude/skills (default: current dir)")
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(fn=cmd_install_skills)
+
+    s = sub.add_parser("demo", help="synthetic end-to-end demo (no API key needed)")
+    s.add_argument("--out", default="analysis/demo")
+    s.set_defaults(fn=cmd_demo)
+    return p
+
+
+def main(argv=None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8")
+        except (AttributeError, ValueError):
+            pass
+    args = build_parser().parse_args(argv)
+    try:
+        return args.fn(args) or 0
+    except (UserError, FileNotFoundError, ValueError) as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

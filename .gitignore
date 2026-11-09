@@ -1,0 +1,19 @@
+# secrets
+.env
+
+# analysis outputs and caches (may contain licensed KIPRIS data or confidential input)
+analysis/
+.park/
+*.sqlite
+
+# raw data never goes into the repo — see docs/DESIGN.md §6
+data/raw/
+*.xlsx
+
+# python
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.venv/
+build/
+dist/

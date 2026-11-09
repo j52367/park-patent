@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "park-patent"
+version = "0.0.1"
+description = "PARK — Patent Analysis Research Kit: Claude Code skills + deterministic tools for Korean patent landscape analysis"
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0",
+  "requests>=2.28",
+]
+
+[project.optional-dependencies]
+excel = ["openpyxl>=3.1"]
+dev = ["pytest>=8"]
+
+[project.scripts]
+park = "park.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["park*"]
+
+[tool.setuptools.package-data]
+park = ["templates/*", "data/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
