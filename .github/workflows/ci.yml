@@ -17,7 +17,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
-      - run: pip install -e ".[dev,excel,learn]"
+      - run: pip install -e ".[dev,excel,learn,fulltext]"
       - run: pytest -q
       # the demo must keep working without any API key or licensed data
       - run: park demo --out analysis/demo

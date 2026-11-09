@@ -205,9 +205,13 @@ def _chart_html(d: Path) -> str:
                    + (f"<h3>진보성 결합 논리 (초안)</h3><ul>{combos}</ul>" if combos else ""))
     if not out:
         return ""
-    return ("<h2>청구항 대비</h2><p class='notice'>대비 대상은 KR 공개특허 중 기준일 이전 문헌뿐이고, "
-            "각 문헌의 <b>요약과 청구항만</b> 대조했습니다(명세서 본문·도면 미포함). 본문이나 도면에만 있는 구성은 "
-            "'일부'나 '미개시'로 남았을 수 있습니다. 신규성·진보성 판단 초안이며 법률 의견이 아닙니다.</p>" + "".join(out))
+    used_desc = any((p.parent / "chart.csv").exists() and "[" in (p.parent / "chart.csv").read_text(encoding="utf-8-sig")
+                    for p in (d / "charts").glob("*/summary.json"))
+    scope = ("각 문헌의 요약·청구항과 <b>명세서 본문 중 구성요소와 관련된 단락</b>을 대조했습니다(도면 이미지 제외, 본문 전체를 읽은 것은 아님)."
+             if used_desc else
+             "각 문헌의 <b>요약과 청구항만</b> 대조했습니다(명세서 본문·도면 미포함). 본문이나 도면에만 있는 구성은 '일부'나 '미개시'로 남았을 수 있습니다.")
+    return ("<h2>청구항 대비</h2><p class='notice'>대비 대상은 KR 공개특허 중 기준일 이전 문헌뿐입니다. " + scope +
+            " 신규성·진보성 판단 초안이며 법률 의견이 아닙니다.</p>" + "".join(out))
 
 
 def _key_table(d: Path) -> str:

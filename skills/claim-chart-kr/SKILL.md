@@ -21,9 +21,16 @@ allowed-tools: Read, Write, Edit, Glob, Bash(park *), Bash(python -m park *), Ag
 
 ## 1. 준비
 
+명세서 본문 없이 요약과 청구항만 대조하면, 본문과 도면에만 있는 구성을 놓친다. 가능하면 `--fulltext`를 쓴다.
+
 ```bash
-park chart <DIR> --target <출원번호> --claim 1 --k 8 --examiner --fetch-claims
+park chart <DIR> --target <출원번호> --claim 1 --k 8 --examiner --fetch-claims --fulltext --include <사용자가 아는 출원번호들>
 ```
+
+- `--fulltext`: 선행문헌의 공보 PDF(등록공보를 먼저, 없으면 공개공보)를 받아 명세서 본문을 단락 단위로 뽑는다(`description/`). 그다음 구성요소마다 관련 단락을 골라 판정 자료에 넣는다.
+  - 형상·배치처럼 청구항에 없고 본문에만 있는 구성을 잡기 위해서다.
+  - 비용은 문헌당 호출 1–2회와 PDF 1건이다. PyMuPDF가 필요하다 (`pip install 'park-patent[fulltext]'`).
+- `--include`: 유사도와 상관없이 반드시 대비할 문헌.
 
 - `charts/<출원번호>_c1/`에 다음이 생긴다.
   - `ELEMENTS.md`: 구성요소 분할 (E0 = 청구항 끝의 대상 이름)
@@ -50,6 +57,6 @@ park merge-chart <DIR> --target <출원번호> --claim 1
 park report <DIR> --strict
 ```
 
-- 인용문은 지정한 청구항 또는 요약 원문과 대조한다.
+- 인용문은 지정한 청구항, 요약, 또는 명세서 단락(`[NNNN]`) 원문과 대조한다. 단락은 PDF 여백의 번호 위치가 부정확해서 앞뒤 한 단락까지 허용한다.
 - 보고서의 "청구항 대비" 절에 문헌 × 구성요소 표(● 개시, ◐ 일부, ○ 미개시), 문헌별 요약, 결합 논리가 실린다.
 - 결론은 "검토 의견 초안"이다. 검색 범위(KR 공개특허) 밖 문헌은 반영되지 않았음을 함께 알린다.

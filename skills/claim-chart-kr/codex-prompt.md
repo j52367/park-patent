@@ -9,7 +9,8 @@ Write done.jsonl with one JSON object per line:
    - 개시 = the document discloses the element as claimed (same structure/function, possibly different words).
    - 일부 = a related feature exists but differs in an essential point (state the difference in note).
    - 미개시 = nothing corresponding; leave quote "" and location "".
-   - quote: copy 6–150 characters VERBATIM from the cited claim (location "청구항 n", n = the number at the start of that claim) or from the abstract (location "요약"). No paraphrase. Machine-checked.
+   - quote: copy 6–150 characters VERBATIM from the cited claim (location "청구항 n", n = the number at the start of that claim), the abstract (location "요약"), or a description paragraph (location "[NNNN]", the paragraph number shown in 명세서 발췌). No paraphrase. Machine-checked (paragraph quotes are checked against that paragraph and its neighbours).
+   - Prefer the description when it shows the element more clearly than the claims (structure, shape, arrangement are often only in the description).
 
 2. One summary per document:
 {"prior_art": "<application_no>", "summary": "<한국어 2문장: 공통점과 핵심 차이>", "novelty": "부정 가능|유지"}

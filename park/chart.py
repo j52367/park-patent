@@ -52,7 +52,8 @@ def _doc_text(r, fulltext: Path) -> str:
     return f"{r['title']} {r['abstract']} {claims}"
 
 
-def prepare(d: Path, target: str, claim_no: int = 1, k: int = 8, examiner_apps: list[str] | None = None) -> Path:
+def prepare(d: Path, target: str, claim_no: int = 1, k: int = 8, examiner_apps: list[str] | None = None,
+            include: list[str] | None = None) -> Path:
     from sklearn.feature_extraction.text import TfidfVectorizer
 
     det = json.loads((d / "details" / f"{target}.json").read_text(encoding="utf-8"))
@@ -73,7 +74,8 @@ def prepare(d: Path, target: str, claim_no: int = 1, k: int = 8, examiner_apps: 
     pool["sim_rank"] = range(1, len(pool) + 1)
     examiner = set(examiner_apps or [])
     pool["examiner_cited"] = pool["application_no"].isin(examiner)
-    chosen = pool[(pool["sim_rank"] <= k) | pool["examiner_cited"]]
+    pool["user_included"] = pool["application_no"].isin(set(include or []))
+    chosen = pool[(pool["sim_rank"] <= k) | pool["examiner_cited"] | pool["user_included"]]
 
     out = d / "charts" / f"{target}_c{claim_no}"
     out.mkdir(parents=True, exist_ok=True)
@@ -90,6 +92,29 @@ def prepare(d: Path, target: str, claim_no: int = 1, k: int = 8, examiner_apps: 
     return out
 
 
+def relevant_paragraphs(spec: dict, elements: list[dict], per_element: int = 4, limit: int = 7000) -> list[tuple[str, str]]:
+    """Description paragraphs most similar to any claim element (char n-gram TF-IDF), in document order."""
+    from sklearn.feature_extraction.text import TfidfVectorizer
+
+    paras = [(k, v) for k, v in spec.get("paragraphs", {}).items() if len(v) > 30]
+    if not paras:
+        return []
+    vec = TfidfVectorizer(analyzer="char_wb", ngram_range=(2, 3), sublinear_tf=True)
+    X = vec.fit_transform([v for _, v in paras] + [e["text"] for e in elements])
+    P, E = X[:len(paras)], X[len(paras):]
+    sim = (P @ E.T).toarray()
+    keep = set()
+    for j in range(sim.shape[1]):
+        keep.update(sim[:, j].argsort()[::-1][:per_element].tolist())
+    chosen, size = [], 0
+    for i in sorted(keep, key=lambda i: paras[i][0]):
+        if size + len(paras[i][1]) > limit:
+            break
+        chosen.append(paras[i])
+        size += len(paras[i][1])
+    return chosen
+
+
 def make_todo(d: Path, out: Path) -> None:
     meta = json.loads((out / "elements.json").read_text(encoding="utf-8"))
     pa = pd.read_csv(out / "prior_art.csv", dtype=str, keep_default_na=False)
@@ -99,9 +124,15 @@ def make_todo(d: Path, out: Path) -> None:
         no = r["application_no"]
         ft = d / "fulltext" / f"{no}.txt"
         claims = ft.read_text(encoding="utf-8") if ft.exists() else "(청구항 없음 — 요약만 대조)"
+        desc = ""
+        sp = d / "description" / f"{no}.json"
+        if sp.exists():
+            spec = json.loads(sp.read_text(encoding="utf-8"))
+            paras = relevant_paragraphs(spec, meta["elements"])
+            desc = "- 명세서 발췌 (구성요소와 관련된 단락):\n" + "\n".join(f"  [{k}] {v}" for k, v in paras) + "\n"
         blocks.append(f"### {no}\n- 명칭: {cand.loc[no, 'title']}\n- 출원일: {cand.loc[no, 'application_date']}"
                       f" · 유사도 순위 {r['sim_rank']}" + (" · **심사관 인용**" if r["examiner_cited"] == "True" else "")
-                      + f"\n- 요약: {cand.loc[no, 'abstract']}\n- 청구항:\n{claims[:6000]}\n")
+                      + f"\n- 요약: {cand.loc[no, 'abstract']}\n- 청구항:\n{claims[:6000]}\n{desc}")
     els = "\n".join(f"- {e['id']}: {e['text']}" for e in meta["elements"])
     (out / "todo.md").write_text(
         f"# 청구항 대비 — {meta['target']} 청구항 {meta['claim_no']} (기준일 {meta['priority_date']})\n\n"
@@ -136,6 +167,16 @@ def merge(d: Path, out: Path) -> tuple[dict, list[str]]:
         loc, quote = str(o.get("location", "")), _squash(o.get("quote", ""))
         if no not in cand.index:
             errors.append(f"{where}: not a candidate")
+            continue
+        para = re.search(r"\[?(\d{4})\]?", loc) if ("[" in loc or "단락" in loc) else None
+        if para:
+            from .fulltext import quote_in_paragraph
+
+            sp = d / "description" / f"{no}.json"
+            ok = sp.exists() and len(quote) >= 6 and quote_in_paragraph(
+                json.loads(sp.read_text(encoding="utf-8")), para.group(1), o.get("quote", ""))
+            if not ok:
+                errors.append(f"{where}: quote not found in description paragraph {para.group(1)} (±1)")
             continue
         if "청구항" in loc:
             ft = d / "fulltext" / f"{no}.txt"

@@ -147,3 +147,46 @@ def test_claim_split_and_chart_merge(tmp_path):
     summary, errors = chart.merge(d, out)
     assert len(errors) == 1 and "E0" in errors[0]
     assert len(summary["summaries"]) == 1 and len(summary["combinations"]) == 1
+
+
+SPEC_TEXT = """등록특허 10-9999999
+배 경 기 술
+[0001]
+본 발명은 가상의 감지 장치에 관한 것으로,
+[0002]
+탄성 돔 아래에 전극을 배치한다. 돔의 변형으로
+등록특허 10-9999999
+정전용량이 변한다.
+[0003]
+끝.
+"""
+
+
+def test_spec_parsing_and_paragraph_window():
+    from park.fulltext import paragraph_window, parse_spec, quote_in_paragraph
+    spec = parse_spec(SPEC_TEXT)
+    assert list(spec["paragraphs"]) == ["0001", "0002", "0003"]
+    assert "등록특허" not in spec["paragraphs"]["0002"]  # page headers are removed
+    assert quote_in_paragraph(spec, "0002", "돔의 변형으로 정전용량이 변한다")  # spans a page break
+    assert quote_in_paragraph(spec, "0001", "탄성 돔 아래에 전극")  # margin numbers are fuzzy: ±1
+    assert not quote_in_paragraph(spec, "0003", "가상의 감지 장치")  # two paragraphs away
+    assert paragraph_window(spec, "x") == ""
+
+
+def test_chart_accepts_description_quotes(tmp_path):
+    from park import chart
+    from park.fulltext import parse_spec
+    d, cand, scr = _project(tmp_path)
+    target, earlier = cand["application_no"].iloc[-1], cand["application_no"].iloc[0]
+    enrich(FakeClient(), [target, earlier], d, log=lambda *_: None)
+    (d / "description").mkdir()
+    (d / "description" / f"{earlier}.json").write_text(json.dumps(parse_spec(SPEC_TEXT), ensure_ascii=False), encoding="utf-8")
+    other = cand["application_no"].iloc[1]
+    out = chart.prepare(d, target, 1, k=1, include=[other])
+    assert other in set(pd.read_csv(out / "prior_art.csv", dtype=str)["application_no"])  # --include
+    chart.make_todo(d, out)
+    rows = [{"prior_art": earlier, "element": "E1", "status": "개시", "location": "[0002]", "quote": "탄성 돔 아래에 전극을 배치한다"},
+            {"prior_art": earlier, "element": "E0", "status": "일부", "location": "[0003]", "quote": "가상의 감지 장치에 관한"}]
+    (out / "done.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    _, errors = chart.merge(d, out)
+    assert len(errors) == 1 and "paragraph 0003" in errors[0]

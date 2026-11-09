@@ -473,14 +473,23 @@ def cmd_chart(a):
     if not (d / "details" / f"{a.target}.json").exists():
         enrich(client, [a.target], d, budget=2)
     examiner = _resolve_examiner(client, d, a.target) if a.examiner else []
-    out = chart.prepare(d, a.target, a.claim, k=a.k, examiner_apps=examiner)
+    out = chart.prepare(d, a.target, a.claim, k=a.k, examiner_apps=examiner,
+                        include=[x.strip() for x in a.include.split(",") if x.strip()])
     pa = read_csv(out / "prior_art.csv")
     missing = [n for n in pa["application_no"] if not (d / "fulltext" / f"{n}.txt").exists()]
     if missing and a.fetch_claims:
         enrich(client, missing, d, budget=a.budget)
+    n_spec = 0
+    if a.fulltext:
+        from . import fulltext
+
+        for no in pa["application_no"]:
+            if fulltext.fetch(client, no, d) is not None:
+                n_spec += 1
     chart.make_todo(d, out)
     hit = pa[pa["examiner_cited"] == "True"]
-    print(f"{out}: {len(pa)} prior-art documents ({len(missing)} fetched claims) · API calls {client.network_calls}")
+    print(f"{out}: {len(pa)} prior-art documents ({len(missing)} fetched claims"
+          + (f", {n_spec} specifications" if a.fulltext else "") + f") · API calls {client.network_calls}")
     for _, r in hit.iterrows():
         print(f"  examiner-cited {r['application_no']} ranked {r['sim_rank']} by similarity")
 
@@ -664,7 +673,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--claim", type=int, default=1)
     s.add_argument("--k", type=int, default=8, help="most similar earlier documents to chart")
     s.add_argument("--examiner", action="store_true", help="also include KR documents the examiner cited (search calls)")
+    s.add_argument("--include", default="", help="comma-separated application numbers to chart in any case")
     s.add_argument("--fetch-claims", action="store_true", help="fetch claims of prior-art documents (2 calls each)")
+    s.add_argument("--fulltext", action="store_true",
+                   help="download specification PDFs and add the most relevant paragraphs (1-2 calls + 1 download each)")
     s.add_argument("--budget", type=int, default=40)
     s.add_argument("--cache", default=".park/kipris_cache.sqlite")
     s.set_defaults(fn=cmd_chart)
