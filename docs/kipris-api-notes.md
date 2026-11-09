@@ -13,7 +13,9 @@
 | 검색식 `IPC=[..]`, `AD=[a~b]`, `*` | ✅ | 같음 | 나머지 문법은 skills/shared-references/kipris-query-syntax.md |
 | 상세 API (서지 상세) | ❌ | 같음 | 노트북에서 404가 나서 제외했다는 기록 |
 | `patFamilyInfoService/getFamilySearch` | ⚠️ | 같음 | 노트북에서 대체 라벨로 넘어간 흔적. 응답 형식 미확인 |
-| 청구항 전문, 인용·피인용 | ⚠️ | — | 2단계·3단계 전에 확인 필요 |
+| 서지 상세 `kipo-api/kipi/patUtiModInfoSearchSevice/getBibliographyDetailInfoSearch` (`applicationNumber`, `ServiceKey`) | ✅ | 2026-11-09 | 호출 1회에 청구항 전문, 청구항 수, 우선권, 심사관 인용문헌(`priorArtDocumentsInfo`, `examinerQuotationFlag`), 법적상태 이력, 패밀리, R&D 과제. 삭제된 청구항은 '삭제'로 옴 |
+| 피인용 `openapi/rest/CitingService/citingInfo` (`standardCitationApplicationNumber`, `accessKey`) | ✅ | 2026-11-09 | 성공해도 `resultCode`가 **빈 값**. `<citingInfo>`마다 인용한 출원번호와 인용 종류 |
+| 패밀리 (서지 상세의 `familyInfoArray`) | ⚠️ | 2026-11-09 | 표본에서 대부분 비어 있음. 해외 패밀리는 '특허 패밀리' 서비스 확인 필요 |
 | 호출 한도 | ✅ (FAQ) | KIPRIS Plus FAQ | 무료 월 1,000회 *호출* |
 | `resultCode=31` `DEADLINE_HAS_EXPIRED_ERROR` | ✅ | 2026-11-09 실제 호출 | 키의 활용 기간 만료. `openapi/rest/...?accessKey=`와 `kipo-api/kipi/...?ServiceKey=` 두 경로 모두 같은 응답 → 경로 문제 아님. KIPRIS Plus 마이페이지에서 기간을 연장해야 한다 |
 | 신 경로 `kipo-api/kipi/patUtiModInfoSearchSevice/getWordSearch` (`word`, `numOfRows`, `pageNo`, `ServiceKey`) | ⚠️ | 2026-11-09 | 키가 인식됨(만료 응답). 정상 응답 형식은 연장 후 확인 |

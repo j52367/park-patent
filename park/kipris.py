@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import os
 import sqlite3
 import time
@@ -29,7 +30,11 @@ from . import normalize as N
 from .schema import CANDIDATE_COLUMNS, conform
 
 BASE_URL = "http://plus.kipris.or.kr/openapi/rest"
+NEW_BASE_URL = "http://plus.kipris.or.kr/kipo-api/kipi"
 SEARCH_PATH = "patUtiModInfoSearchSevice/freeSearchInfo"
+DETAIL_PATH = "patUtiModInfoSearchSevice/getBibliographyDetailInfoSearch"  # NEW_BASE_URL, ServiceKey
+CITING_PATH = "CitingService/citingInfo"                                    # BASE_URL, accessKey
+SECRET_PARAMS = {"accessKey", "ServiceKey"}
 DEFAULT_DB = Path(".park") / "kipris_cache.sqlite"
 
 # XML tag -> candidates.csv column
@@ -85,25 +90,32 @@ class KiprisClient:
     # ---------- low level ----------
     @staticmethod
     def _cache_key(path: str, params: dict) -> str:
-        public = {k: v for k, v in sorted(params.items()) if k != "accessKey"}
+        public = {k: v for k, v in sorted(params.items()) if k not in SECRET_PARAMS}
         return hashlib.sha256(f"{path}?{json.dumps(public, ensure_ascii=False)}".encode()).hexdigest()
 
     def is_cached(self, path: str, params: dict) -> bool:
         key = self._cache_key(path, params)
         return self._db.execute("SELECT 1 FROM responses WHERE key=?", (key,)).fetchone() is not None
 
-    def get(self, path: str, params: dict, use_cache: bool = True) -> tuple[bytes, str]:
-        """Return (body, fetched_at ISO time). Cached bodies keep their original fetch time."""
-        key = self._cache_key(path, params)
+    def get(self, path: str, params: dict, use_cache: bool = True, base: str | None = None,
+            key_param: str = "accessKey", empty_code_ok: bool = False) -> tuple[bytes, str]:
+        """Return (body, fetched_at ISO time). Cached bodies keep their original fetch time.
+
+        base/key_param: the newer `kipo-api/kipi` services live under another base URL and take
+        the key as `ServiceKey`. empty_code_ok: some services (CitingService) return an empty
+        resultCode on success.
+        """
+        cache_path = path if base is None else f"{base.rstrip('/')}/{path}"
+        key = self._cache_key(cache_path, params)
         if use_cache:
             row = self._db.execute("SELECT body, fetched_at FROM responses WHERE key=?", (key,)).fetchone()
             if row:
                 return row[0], row[1]
         if not self.api_key:
             raise KiprisError("KIPRIS_API_KEY is not set (put it in .env). Cached queries still work offline.")
-        public = json.dumps({k: v for k, v in params.items() if k != "accessKey"}, ensure_ascii=False)
-        resp = self.session.get(f"{self.base_url}/{path}", params={**params, "accessKey": self.api_key},
-                                timeout=30)
+        public = json.dumps({k: v for k, v in params.items() if k not in SECRET_PARAMS}, ensure_ascii=False)
+        resp = self.session.get(f"{(base or self.base_url).rstrip('/')}/{path}",
+                                params={**params, key_param: self.api_key}, timeout=30)
         self.network_calls += 1
         now = datetime.now(timezone.utc).isoformat()
         self._db.execute("INSERT INTO calls VALUES (?,?,?,?)", (now, path, public, resp.status_code))
@@ -114,15 +126,30 @@ class KiprisClient:
             raise KiprisError(f"HTTP {resp.status_code} from {path}")
         body = resp.content
         code, msg = _result_code(body)
-        if code != "00":
+        if not (code == "00" or (empty_code_ok and code == "" and not msg)):
             raise KiprisError(f"KIPRIS resultCode={code}: {msg}")
-        self._db.execute("INSERT OR REPLACE INTO responses VALUES (?,?,?,?,?)", (key, path, public, body, now))
+        self._db.execute("INSERT OR REPLACE INTO responses VALUES (?,?,?,?,?)", (key, cache_path, public, body, now))
         self._db.commit()
         return body, now
 
     def calls_this_month(self) -> int:
         month = datetime.now(timezone.utc).strftime("%Y-%m")
         return self._db.execute("SELECT COUNT(*) FROM calls WHERE substr(ts,1,7)=?", (month,)).fetchone()[0]
+
+    # ---------- detail / citations (verified 2026-11-09) ----------
+    def detail(self, application_no: str, use_cache: bool = True) -> dict:
+        """Bibliography detail: claims, priority, examiner-cited prior art, legal status, family, R&D."""
+        body, fetched = self.get(DETAIL_PATH, {"applicationNumber": application_no}, use_cache,
+                                 base=NEW_BASE_URL, key_param="ServiceKey")
+        out = parse_detail(body)
+        out["fetched_at"] = fetched
+        return out
+
+    def citing(self, application_no: str, use_cache: bool = True) -> list[dict]:
+        """Korean documents that cite this application (forward citations)."""
+        body, _ = self.get(CITING_PATH, {"standardCitationApplicationNumber": application_no}, use_cache,
+                           empty_code_ok=True)
+        return parse_citing(body)
 
     # ---------- search ----------
     @staticmethod
@@ -216,3 +243,58 @@ def items_to_candidates(items: list[dict], as_of: str = ""):
         })
     return conform(pd.DataFrame(rows, columns=[c for c in CANDIDATE_COLUMNS if c != "schema_version"]),
                    CANDIDATE_COLUMNS)
+
+
+def _txt(el, tag: str) -> str:
+    v = el.findtext(tag) if el is not None else None
+    return (v or "").strip()
+
+
+def parse_detail(body: bytes) -> dict:
+    root = ET.fromstring(body)
+    summ = root.find(".//biblioSummaryInfo")
+    claims = [(c.text or "").strip() for c in root.iter("claim") if (c.text or "").strip()]
+    prior = [{"number": _txt(p, "documentsNumber"), "examiner": _txt(p, "examinerQuotationFlag") == "Y"}
+             for p in root.iter("priorArtDocumentsInfo") if _txt(p, "documentsNumber")]
+    family = [{c.tag: (c.text or "").strip() for c in f} for f in root.iter("familyInfo")]
+    family = [f for f in family if any(f.values())]
+    legal = [{"date": _txt(s, "receiptDate"), "document": _txt(s, "documentName"), "status": _txt(s, "commonCodeName")}
+             for s in root.iter("legalStatusInfo")]
+    rnd = [{c.tag: (c.text or "").strip() for c in r} for r in root.iter("rndInfo")]
+    rnd = [r for r in rnd if any(r.values())]
+    return {
+        "application_no": re.sub(r"\D", "", _txt(summ, "applicationNumber")),
+        "title": _txt(summ, "inventionTitle"),
+        "claim_count": int(_txt(summ, "claimCount") or len(claims) or 0),
+        "register_status": _txt(summ, "registerStatus"),
+        "register_number": _txt(summ, "registerNumber"),
+        "final_disposal": _txt(summ, "finalDisposal"),
+        "claims": claims,
+        "independent_claims": independent_claims(claims),
+        "priority": [{"country": _txt(p, "priorityApplicationCountry"), "number": _txt(p, "priorityApplicationNumber"),
+                      "date": _txt(p, "priorityApplicationDate")} for p in root.iter("priorityInfo")
+                     if _txt(p, "priorityApplicationNumber")],
+        "prior_art": prior,
+        "family": family,
+        "legal_status": legal,
+        "rnd": rnd,
+    }
+
+
+# "제1항에 있어서", "청구항 1에 있어서", "according to claim 1" → dependent claim
+DEPENDENT_RE = re.compile(r"(제\s*\d+\s*항|청구항\s*\d+|claim\s+\d+)", re.I)
+
+
+DELETED_RE = re.compile(r"^\s*\d+\s*\.\s*(삭제|\(삭제\)|deleted|canceled|cancelled)\s*\.?\s*$", re.I)
+
+
+def independent_claims(claims: list[str]) -> list[str]:
+    """Claims that neither refer to another claim (in their opening words) nor were deleted."""
+    return [c for c in claims if not DELETED_RE.match(c) and not DEPENDENT_RE.search(c[:120])]
+
+
+def parse_citing(body: bytes) -> list[dict]:
+    root = ET.fromstring(body)
+    return [{"citing_application_no": _txt(c, "ApplicationNumber"),
+             "type": _txt(c, "CitationLiteratureTypeCodeName")} for c in root.iter("citingInfo")
+            if _txt(c, "ApplicationNumber")]

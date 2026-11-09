@@ -50,6 +50,8 @@ Claude Code에서:
 | `/relevance-screening` | 노이즈/유효 선별 + 원문 인용 + 노이즈 재검토 |
 | `/patent-map` | 출원 동향·출원인·IPC·기술분류 매트릭스·성장 단계 |
 | `/park-report` | 해석 작성(숫자는 자리표시자) + REPORT.html |
+| `/key-patent-review` | 2단계: 청구항 원문으로 핵심·주목·일반 판정 |
+| `/ip-strategy` | 2단계: 특허 기반 SWOT와 전략 제안 |
 
 ## KIPRIS Plus API
 
@@ -67,6 +69,9 @@ Claude Code에서:
 | `park quota` | 이번 달 API 호출 수 |
 | `park rank` | 분류표와의 유사도로 후보 정렬. `--learn`이면 지금까지의 판정으로 학습해 정렬 (CPU) |
 | `park batches` / `merge-screening` / `audit-sample` | 선별 작업 단위, 다시 판정, 꼬리 표본 |
+| `park shortlist` / `enrich` | 2단계 대상 압축, 청구항·피인용·법적상태 수집 (문헌당 호출 2회) |
+| `park review-batches` / `merge-review` | 핵심특허 판정 배치, 청구항 인용 검증 |
+| `park swot` | 초점 출원인 대 경쟁 출원인 집계와 SWOT 후보 |
 | `park map <dir>` | 집계(`map/stats.json`)와 SVG 차트 |
 | `park check <dir>` | 인용 검증, 분류 코드 검증, 보고서 숫자 검사 |
 | `park report <dir>` | REPORT.html |
@@ -81,7 +86,8 @@ Claude Code에서:
 - [x] 1단계 실제 주제로 실행 (KR 후보 약 7천 건): 사전 정렬 → 상위 구간 선별 → 꼬리 표본으로 남은 유효 건수 추정 → 보고서
 - [x] 선택 백엔드: Codex CLI 병렬 선별 (`scripts/codex-screen.sh`)
 - [x] 정렬 실험: 판정 학습 정렬(CPU)이 다국어 임베딩보다 낫다 → `park rank --learn` ([기록](docs/experiments/2026-11-09_ranking.md))
-- [ ] 청구항·패밀리·인용 서비스 연동
+- [x] 2단계: 압축 목록 → 청구항·피인용 수집 → 청구항 원문 기반 핵심특허 판정(인용 검증) → 특허 기반 SWOT, 보고서에 핵심특허 표와 SWOT 절
+- [ ] 청구항 대비표(신규성·진보성·침해), 해외 특허(KIPRIS 해외특허 API)
 - [ ] 1단계: 실제 과제 1건 완주, 사전 정렬(BM25/임베딩)
 - [ ] 2단계: 핵심특허 전문 검토, 청구항 대비(신규성·진보성·침해), 무효 공방, 전략, 해외 문헌
 - [ ] 3단계: 한국어 특허 검색 모델, KR 무효 근거 벤치마크

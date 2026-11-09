@@ -159,6 +159,34 @@ def _legend(stats: dict) -> str:
     return " · ".join(f"{k}={v}" for k, v in labels.items())
 
 
+def _key_table(d: Path) -> str:
+    """Key patents from key_review.csv (+ shortlist/enrich for context)."""
+    import pandas as pd
+
+    kp = d / "key_review.csv"
+    if not kp.exists():
+        return ""
+    k = pd.read_csv(kp, dtype=str, keep_default_na=False)
+    counts = k["importance"].value_counts().to_dict()
+    k = k[k["importance"] == "핵심"]
+    for name in ("shortlist.csv", "enrich.csv"):
+        if (d / name).exists():
+            k = k.merge(pd.read_csv(d / name, dtype=str, keep_default_na=False), on="application_no", how="left",
+                        suffixes=("", "_x"))
+    if "application_date" in k:
+        k = k.sort_values("application_date")
+    rows = "".join(
+        f"<tr><td>{escape(r.get('application_no', ''))}</td><td class='num'>{escape(str(r.get('application_date', ''))[:4])}</td>"
+        f"<td>{escape(r.get('tech_code', ''))}</td><td>{escape(str(r.get('applicants', '')).split('|')[0])}</td>"
+        f"<td>{escape(r.get('title', ''))}</td><td class='num'>{escape(str(r.get('forward_citations', '')))}</td>"
+        f"<td>{escape(r.get('key_features', ''))}</td></tr>" for _, r in k.iterrows())
+    summary = ", ".join(f"{g} {counts.get(g, 0):,}건" for g in ("핵심", "주목", "일반"))
+    return (f"<h2>핵심특허</h2><p class=\"sub\">청구항 원문 기반 판정({summary}). 근거 인용은 모두 해당 청구항 원문과 대조했습니다. "
+            "피인용은 KIPRIS 한국 피인용 문헌 수입니다.</p>"
+            "<table><thead><tr><th>출원번호</th><th>연도</th><th>분류</th><th>출원인</th><th>명칭</th><th>피인용</th>"
+            f"<th>청구항이 보호하는 것</th></tr></thead><tbody>{rows}</tbody></table>")
+
+
 def build(analysis_dir: str | Path, title: str | None = None) -> tuple[Path, list[str]]:
     d = Path(analysis_dir)
     stats_path = d / "map" / "stats.json"
@@ -173,6 +201,9 @@ def build(analysis_dir: str | Path, title: str | None = None) -> tuple[Path, lis
         p = d / name
         return p.read_text(encoding="utf-8") if p.exists() else ""
 
+    swot_path = d / "swot_stats.json"
+    if swot_path.exists():
+        stats = {**stats, "swot": json.loads(swot_path.read_text(encoding="utf-8"))}
     notes = read("REPORT_NOTES.md")
     notes_html = ""
     if notes:
@@ -181,6 +212,15 @@ def build(analysis_dir: str | Path, title: str | None = None) -> tuple[Path, lis
         from .checks import lint_numbers
         problems += [f"REPORT_NOTES.md {h}" for h in lint_numbers(notes)]
         notes_html = md_to_html(filled)
+    swot_md = read("SWOT.md")
+    swot_html = ""
+    if swot_md:
+        filled, missing = fill_placeholders(swot_md, stats)
+        problems += [f"SWOT.md: unknown placeholder {{{{{m}}}}}" for m in missing]
+        from .checks import lint_numbers
+        problems += [f"SWOT.md {h}" for h in lint_numbers(swot_md)]
+        swot_html = ("<h2>SWOT · 특허 전략</h2>" + _figure(d / "map" / "swot_matrix.svg", "초점 출원인과 경쟁 출원인의 기술 분류별 유효특허 수. " + _legend(stats))
+                     + md_to_html(filled))
 
     basis_label = "유효특허(선별 완료)" if meta["basis"] == "valid" else "전체 후보 (아직 선별 전)"
     coverage_html = ""
@@ -239,6 +279,8 @@ def build(analysis_dir: str | Path, title: str | None = None) -> tuple[Path, lis
 <h2>권리 상태</h2>
 <table><thead><tr><th>상태</th><th>건수</th></tr></thead><tbody>{status_rows}</tbody></table>
 <p class="sub">{escape(_status_note(meta))}</p>
+{_key_table(d)}
+{swot_html}
 <h2>검색 범위</h2>
 {md_to_html(search_log, shift=2) if search_log else '<p class="notice">SEARCH_LOG.md가 없습니다. 검색 범위를 알 수 없는 보고서는 결론에 쓰지 마세요.</p>'}
 {('<h2>기술 분류표</h2>' + md_to_html(tech_tree, shift=2)) if tech_tree else ''}

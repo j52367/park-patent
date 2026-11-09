@@ -1,22 +1,26 @@
 #!/usr/bin/env bash
 # Optional backend: screen PARK batches with the OpenAI Codex CLI, several workers in parallel.
 #
-#   scripts/codex-screen.sh <analysis-dir> [workers=4] [effort=medium]
+#   scripts/codex-screen.sh <analysis-dir> [workers=4] [effort=medium] [mode=screen|review]
 #
 # Screens every screening/todo/*.md that has no screening/done/<name>.jsonl yet, so it can simply be
 # re-run after an interruption (e.g. a ChatGPT usage limit). Batches named recheck_* get the
 # ':recheck' suffix and tail_audit* the matching ':tail-audit[-rN]' suffix on screened_by.
-# Then run:  park merge-screening <analysis-dir>
+# Then run:  park merge-screening <analysis-dir>   (mode=review: park merge-review <analysis-dir>)
 #
 # Patent text is sent to OpenAI. Do not use this for confidential input without permission.
 set -u
 dir=$(cd "$1" && pwd) || exit 1
-workers=${2:-4}; effort=${3:-medium}
+workers=${2:-4}; effort=${3:-medium}; mode=${4:-screen}
 here=$(cd "$(dirname "$0")/.." && pwd)
-prompt_file="$here/skills/relevance-screening/codex-prompt.md"
+if [ "$mode" = review ]; then
+  prompt_file="$here/skills/key-patent-review/codex-prompt.md"; work=review
+else
+  prompt_file="$here/skills/relevance-screening/codex-prompt.md"; work=screening
+fi
 command -v codex >/dev/null || { echo "codex CLI not found"; exit 2; }
 cd "$dir" || exit 1
-mkdir -p screening/done screening/logs
+mkdir -p "$work/done" "$work/logs"
 
 run() {  # run <id> <suffix> <batch files...>
   local id=$1 suffix=$2; shift 2
@@ -25,13 +29,13 @@ run() {  # run <id> <suffix> <batch files...>
     "$(cat "$prompt_file")
 
 Your assigned batch files: ${list%, }
-Use screened_by suffix: \"$suffix\"" < /dev/null > "screening/logs/codex_$id.log" 2>&1
+Use screened_by suffix: \"$suffix\"" < /dev/null > "$work/logs/codex_$id.log" 2>&1
 }
 
 pending=(); special=()
-for f in screening/todo/*.md; do
+for f in "$work"/todo/*.md; do
   b=$(basename "$f" .md)
-  [ -f "screening/done/$b.jsonl" ] && continue
+  [ -f "$work/done/$b.jsonl" ] && continue
   case "$b" in recheck_*|tail_audit*) special+=("$f");; *) pending+=("$f");; esac
 done
 echo "pending batches: $(( ${#pending[@]} + ${#special[@]} ))"
@@ -52,9 +56,9 @@ done
 wait
 
 left=0
-for f in screening/todo/*.md; do b=$(basename "$f" .md); [ -f "screening/done/$b.jsonl" ] || left=$((left + 1)); done
-if grep -qh "usage limit" screening/logs/*.log 2>/dev/null; then
-  echo "stopped by a usage limit: $(grep -h -o 'try again at [^.]*' screening/logs/*.log | head -1). $left batches left — re-run this script later."
+for f in "$work"/todo/*.md; do b=$(basename "$f" .md); [ -f "$work/done/$b.jsonl" ] || left=$((left + 1)); done
+if grep -qh "usage limit" "$work"/logs/*.log 2>/dev/null; then
+  echo "stopped by a usage limit: $(grep -h -o 'try again at [^.]*' "$work"/logs/*.log | head -1). $left batches left — re-run this script later."
 else
   echo "done; $left batches without results"
 fi

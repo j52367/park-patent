@@ -362,6 +362,89 @@ def cmd_rank(a):
     print(f"ranked {len(r)} candidates -> {d / 'rank.csv'} (top score {r['rank_score'].iloc[0]:.3f})")
 
 
+def cmd_shortlist(a):
+    from .enrich import shortlist
+
+    d = Path(a.dir)
+    cand, screen = _load(d)
+    if screen is None:
+        raise UserError("shortlist needs screening.csv")
+    rank = read_csv(d / "rank.csv") if (d / "rank.csv").exists() else None
+    s = shortlist(cand, screen, rank, [f for f in (a.focal or "").split(",")], n=a.n, per_code=a.per_code)
+    write_csv(s, d / "shortlist.csv")
+    print(f"shortlist.csv: {len(s)} documents " + str(s["reason"].str.split("-").str[0].value_counts().to_dict()))
+
+
+def cmd_enrich(a):
+    from .enrich import enrich
+    from .kipris import KiprisClient, KiprisError
+
+    d = Path(a.dir)
+    src = d / a.source
+    if not src.exists():
+        raise UserError(f"{src} not found — run `park shortlist` first (or pass --source)")
+    numbers = read_csv(src)["application_no"].tolist()
+    client = KiprisClient(db_path=a.cache)
+    try:
+        df = enrich(client, numbers, d, budget=a.budget)
+    except KiprisError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
+    write_csv(df, d / "enrich.csv")
+    print(f"enrich.csv: {len(df)} of {len(numbers)} documents · new API calls {client.network_calls} · "
+          f"with claims {int((df['claim_count'].astype(int) > 0).sum()) if len(df) else 0}")
+
+
+def cmd_review_batches(a):
+    from . import review
+
+    d = Path(a.dir)
+    for f in ("shortlist.csv", "enrich.csv"):
+        if not (d / f).exists():
+            raise UserError(f"{d / f} not found — run `park shortlist` and `park enrich` first")
+    n = review.make_batches(d, a.size)
+    print(f"{n} key-review batches in {d / 'review' / 'todo'}")
+
+
+def cmd_merge_review(a):
+    from . import review
+
+    d = Path(a.dir)
+    df, errors = review.merge(d)
+    print(f"key_review.csv: {len(df)} rows {df['importance'].value_counts().to_dict() if len(df) else {}}")
+    for e in errors[:30]:
+        print(f"  ERROR: {e}")
+    print("OK" if not errors else f"FAILED ({len(errors)} errors)")
+    return 1 if errors else 0
+
+
+def cmd_swot(a):
+    from . import swot
+
+    d = Path(a.dir)
+    cand, screen = _load(d)
+    if screen is None:
+        raise UserError("swot needs screening.csv")
+    kr = read_csv(d / "key_review.csv") if (d / "key_review.csv").exists() else None
+    en = read_csv(d / "enrich.csv") if (d / "enrich.csv").exists() else None
+    tt = d / "TECH_TREE.md"
+    labels = checks.tech_labels(tt.read_text(encoding="utf-8")) if tt.exists() else {}
+    as_of = a.as_of or max([v for v in cand["status_as_of"] if v], default="") or date.today().isoformat()
+    s = swot.compute(cand, screen, a.focal, [c.strip() for c in a.vs.split(",") if c.strip()], as_of=as_of,
+                     window=a.window, key_review=kr, enrich=en, tech_labels=labels)
+    (d / "swot_stats.json").write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+    apps = s["applicants"]
+    codes = [r["code"] for r in s["codes"]]
+    m = d / "map"
+    m.mkdir(exist_ok=True)
+    (m / "swot_matrix.svg").write_text(charts.heatmap([_short(x["name"], 18) for x in apps], codes,
+                                                      [[x["by_code"][c] for c in codes] for x in apps],
+                                                      "초점 출원인과 경쟁 출원인 × 기술 분류"), encoding="utf-8")
+    h = s["hints"]
+    print(f"swot_stats.json: focal {a.focal} ({apps[0]['n']} valid) vs {len(apps) - 1} competitors · "
+          f"hints S{len(h['S'])} W{len(h['W'])} O{len(h['O'])} T{len(h['T'])}")
+
+
 def cmd_check(a):
     d = Path(a.dir)
     cand, screen = _load(d)
@@ -489,6 +572,37 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("merge-screening", help="merge screening/done/*.jsonl into screening.csv and check it")
     s.add_argument("dir")
     s.set_defaults(fn=cmd_merge_screening)
+
+    s = sub.add_parser("shortlist", help="pick valid documents for phase-2 review (focal applicant + per-code best + score)")
+    s.add_argument("dir")
+    s.add_argument("--n", type=int, default=300)
+    s.add_argument("--per-code", type=int, default=12)
+    s.add_argument("--focal", default="", help="comma-separated applicant display names to include in full")
+    s.set_defaults(fn=cmd_shortlist)
+
+    s = sub.add_parser("enrich", help="fetch claims, cited prior art, legal status and forward citations (2 calls/doc)")
+    s.add_argument("dir")
+    s.add_argument("--source", default="shortlist.csv")
+    s.add_argument("--budget", type=int, default=None, help="max new API calls")
+    s.add_argument("--cache", default=".park/kipris_cache.sqlite")
+    s.set_defaults(fn=cmd_enrich)
+
+    s = sub.add_parser("review-batches", help="batches of shortlisted docs with independent claims + signals")
+    s.add_argument("dir")
+    s.add_argument("--size", type=int, default=15)
+    s.set_defaults(fn=cmd_review_batches)
+
+    s = sub.add_parser("merge-review", help="merge review/done/*.jsonl into key_review.csv and verify claim quotes")
+    s.add_argument("dir")
+    s.set_defaults(fn=cmd_merge_review)
+
+    s = sub.add_parser("swot", help="patent-based SWOT inputs for a focal applicant vs competitors (swot_stats.json)")
+    s.add_argument("dir")
+    s.add_argument("--focal", required=True, help="applicant display name as in the report")
+    s.add_argument("--vs", default="", help="comma-separated competitor display names")
+    s.add_argument("--window", type=int, default=5, help="years per comparison window (recent vs previous)")
+    s.add_argument("--as-of", default="")
+    s.set_defaults(fn=cmd_swot)
 
     s = sub.add_parser("rank", help="pre-rank candidates by similarity to TECH_TREE.md (screen in this order)")
     s.add_argument("dir")
