@@ -192,7 +192,10 @@ def build(analysis_dir: str | Path, title: str | None = None) -> tuple[Path, lis
             coverage_html += (f" 미선별 구간에서 무작위로 {meta['tail_sample']}건을 뽑아 본 결과 {meta['tail_valid']}건이 유효였으므로, "
                               f"미선별 문헌 중 유효특허는 약 {meta['tail_est_valid']:,}건"
                               f"(95% 신뢰구간 {meta['tail_est_low']:,}–{meta['tail_est_high']:,}건)으로 추정됩니다. "
-                              "추세·순위 해석에 이 누락을 감안하세요.")
+                              + (f"즉 이 보고서는 전체 유효특허의 약 {meta['est_recall'] * 100:.0f}%"
+                                 f"({meta['est_recall_low'] * 100:.0f}–{meta['est_recall_high'] * 100:.0f}%)를 담고 있습니다. "
+                                 if "est_recall" in meta else "")
+                              + "추세·순위 해석에 이 누락을 감안하세요.")
         coverage_html += "</p>"
     kpis = [
         (f"{meta['n_counted']:,}", f"집계 대상 건수 · {basis_label}"),

@@ -192,6 +192,9 @@ def test_coverage_estimates_valid_docs_left_below_the_cut():
     assert s["n_screened"] == 20 and s["n_unscreened"] == 80
     assert s["tail_valid"] == 5 and s["tail_est_valid"] == 40
     assert s["tail_est_low"] < 40 < s["tail_est_high"]
+    full = stats.compute(c, _screen(rows), as_of="2025-01-01")["meta"]
+    assert full["n_counted"] == 15 and full["est_recall"] == round(15 / (15 + 40), 4)
+    assert full["est_recall_low"] < full["est_recall"] < full["est_recall_high"]
 
 
 def test_recheck_newest_wins_and_tail_rounds(tmp_path):
@@ -228,3 +231,31 @@ def test_recheck_newest_wins_and_tail_rounds(tmp_path):
     c = _cand([{"application_no": str(i), "application_date": "2020-01-01", "applicants": "A"} for i in range(30)])
     m = stats.compute(c, _screen(rows), as_of="2025-01-01")["meta"]
     assert m["tail_round"] == 2 and m["tail_valid"] == 0 and m["tail_sample"] == 4
+
+
+def test_learned_rank_puts_unscreened_relevant_docs_first(tmp_path):
+    d = tmp_path / "p"
+    assert main(["demo", "--out", str(d)]) == 0  # 534 synthetic docs with ground-truth screening
+    truth = read_csv(d / "screening.csv")
+    # keep only half of the judgements, as if screening were half done
+    half = truth.sample(frac=0.5, random_state=1)
+    from park.schema import write_csv
+    write_csv(half, d / "screening.csv")
+    assert main(["rank", str(d), "--learn"]) == 0
+    r = read_csv(d / "rank.csv")
+    ev = json.loads((d / "rank_eval.json").read_text(encoding="utf-8"))
+    assert ev["cv_all"]["auc"] > 0.9 and r["method"].iloc[0] == "learn"
+    unl = r[r["labelled"] == "False"].merge(truth[["application_no", "relevance"]], on="application_no")
+    top = unl.head(len(unl) // 2)
+    assert (top["relevance"] == "valid").mean() > (unl["relevance"] == "valid").mean()  # better than random
+    assert main(["batches", str(d), "--next", "30", "--prefix", "r2", "--size", "10"]) == 0
+    assert len(list((d / "screening" / "todo").glob("r2_*.md"))) == 3
+
+
+def test_learned_rank_needs_enough_judgements(tmp_path, capsys):
+    d = tmp_path / "p"
+    main(["demo", "--out", str(d)])
+    from park.schema import write_csv
+    write_csv(read_csv(d / "screening.csv").head(10), d / "screening.csv")
+    assert main(["rank", str(d), "--learn"]) == 2
+    assert "needs at least" in capsys.readouterr().err

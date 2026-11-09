@@ -229,11 +229,16 @@ def cmd_batches(a):
         ids = set(screen[(screen["relevance"] == "valid") & screen["tech_code"].isin(codes)]["application_no"])
         todo = cand[cand["application_no"].isin(ids)]
     else:
+        if (a.top or a.next) and "rank" not in cand.columns:
+            raise UserError("--top/--next need rank.csv — run `park rank` first")
         if a.top:
-            if "rank" not in cand.columns:
-                raise UserError("--top needs rank.csv — run `park rank` first")
             cand = cand[pd.to_numeric(cand["rank"], errors="coerce") <= a.top]
         todo = cand[~cand["application_no"].isin(done)]
+        if a.next:
+            todo = todo.head(a.next)
+        if (a.top or a.next) and len(todo):
+            print(f"lowest rank included: {int(pd.to_numeric(todo['rank']).max())} "
+                  "(use it as --below-rank for the next tail sample)")
     prefix = a.prefix
     if (d / "screening" / "done").exists() and any((d / "screening" / "done").glob(f"{prefix}_*.jsonl")) and not a.force:
         raise UserError(f"screening/done already has {prefix}_*.jsonl — use a new --prefix (e.g. r2) so results are not overwritten")
@@ -334,11 +339,25 @@ def cmd_rank(a):
     from . import rank as R
 
     d = Path(a.dir)
-    cand, _ = _load(d)
+    cand, screen = _load(d)
+    if a.learn:
+        from .learn import learn_rank
+
+        if screen is None:
+            raise UserError("--learn needs screening.csv (judge some batches first)")
+        r, ev = learn_rank(cand, screen)
+        write_csv(r, d / "rank.csv")
+        (d / "rank_eval.json").write_text(json.dumps(ev, ensure_ascii=False, indent=2), encoding="utf-8")
+        cv, tail = ev["cv_all"], ev["cv_tail"]
+        print(f"learned from {ev['labelled']} judgements ({ev['valid']} valid); cross-validated AUC {cv['auc']}, "
+              f"AP {cv['ap']}" + (f"; on tail samples AUC {tail['auc']}, AP {tail['ap']}" if tail else ""))
+        print(f"ranked {len(r)} candidates -> {d / 'rank.csv'} (scores order documents; they are not calibrated)")
+        return 0
     tt = d / "TECH_TREE.md"
     if not tt.exists():
         raise UserError(f"{tt} not found — rank needs the technology classification table")
     r = R.rank(cand, tt.read_text(encoding="utf-8"), a.terms)
+    r["method"] = "similarity"
     write_csv(r, d / "rank.csv")
     print(f"ranked {len(r)} candidates -> {d / 'rank.csv'} (top score {r['rank_score'].iloc[0]:.3f})")
 
@@ -461,6 +480,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("dir")
     s.add_argument("--size", type=int, default=40)
     s.add_argument("--top", type=int, default=0, help="only candidates ranked within the top N (needs rank.csv)")
+    s.add_argument("--next", type=int, default=0, help="the next N unscreened candidates in rank order (needs rank.csv)")
     s.add_argument("--prefix", default="batch", help="batch file prefix; use a new one per screening round (r2, recheck...)")
     s.add_argument("--recheck-codes", default="", help="re-judge docs already valid under these codes, e.g. C1,W1,W2")
     s.add_argument("--force", action="store_true", help="allow a prefix that already has results")
@@ -473,6 +493,8 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("rank", help="pre-rank candidates by similarity to TECH_TREE.md (screen in this order)")
     s.add_argument("dir")
     s.add_argument("--terms", default="", help="extra keywords that describe the target technology")
+    s.add_argument("--learn", action="store_true",
+                   help="rank by a model trained on screening.csv judgements (needs scikit-learn)")
     s.set_defaults(fn=cmd_rank)
 
     s = sub.add_parser("audit-sample", help="sample noise-labelled docs for a false-negative re-check")

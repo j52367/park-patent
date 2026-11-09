@@ -167,6 +167,14 @@ def compute(candidates: pd.DataFrame, screening: pd.DataFrame | None = None, as_
         result["country_by_year"] = {"countries": order, "years": yrs,
                                      "values": [[int(cy.get((c, y), 0)) for y in yrs] for c in order]}
 
+    m = result["meta"]
+    if basis == "valid" and "tail_est_valid" in m:
+        # share of all relevant documents that this report already counts (point estimate and 95% range)
+        found = m["n_counted"]
+        m["est_recall"] = round(found / (found + m["tail_est_valid"]), 4) if found + m["tail_est_valid"] else 1.0
+        m["est_recall_low"] = round(found / (found + m["tail_est_high"]), 4) if found + m["tail_est_high"] else 1.0
+        m["est_recall_high"] = round(found / (found + m["tail_est_low"]), 4) if found + m["tail_est_low"] else 1.0
+
     if basis == "valid" and (pop["tech_code"] != "").any():
         codes = sorted(c for c in pop["tech_code"].unique() if c)
         yrs = [r["year"] for r in yearly]
