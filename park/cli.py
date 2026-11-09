@@ -445,6 +445,60 @@ def cmd_swot(a):
           f"hints S{len(h['S'])} W{len(h['W'])} O{len(h['O'])} T{len(h['T'])}")
 
 
+def _resolve_examiner(client, d: Path, target: str) -> list[str]:
+    """KR publication numbers cited by the examiner → application numbers (1 cached search call each)."""
+    det = json.loads((d / "details" / f"{target}.json").read_text(encoding="utf-8"))
+    apps = []
+    for p in det.get("prior_art", []):
+        num = re.sub(r"\D", "", p.get("number", ""))
+        if not p.get("number", "").upper().startswith("KR") or len(num) != 13:
+            continue
+        _, items = client.search_page(num, 1, 5)
+        for it in items:
+            pubs = {re.sub(r"\D", "", str(v)) for k, v in it.get("_raw", {}).items()
+                    if "Number" in k and "Application" not in k}  # publication/registration numbers only
+            if num in pubs:
+                apps.append(it["application_no"])
+                break
+    return apps
+
+
+def cmd_chart(a):
+    from . import chart
+    from .enrich import enrich
+    from .kipris import KiprisClient
+
+    d = Path(a.dir)
+    client = KiprisClient(db_path=a.cache)
+    if not (d / "details" / f"{a.target}.json").exists():
+        enrich(client, [a.target], d, budget=2)
+    examiner = _resolve_examiner(client, d, a.target) if a.examiner else []
+    out = chart.prepare(d, a.target, a.claim, k=a.k, examiner_apps=examiner)
+    pa = read_csv(out / "prior_art.csv")
+    missing = [n for n in pa["application_no"] if not (d / "fulltext" / f"{n}.txt").exists()]
+    if missing and a.fetch_claims:
+        enrich(client, missing, d, budget=a.budget)
+    chart.make_todo(d, out)
+    hit = pa[pa["examiner_cited"] == "True"]
+    print(f"{out}: {len(pa)} prior-art documents ({len(missing)} fetched claims) · API calls {client.network_calls}")
+    for _, r in hit.iterrows():
+        print(f"  examiner-cited {r['application_no']} ranked {r['sim_rank']} by similarity")
+
+
+def cmd_merge_chart(a):
+    from . import chart
+
+    d = Path(a.dir)
+    out = d / "charts" / f"{a.target}_c{a.claim}"
+    summary, errors = chart.merge(d, out)
+    print(f"{out / 'chart.csv'}: fully disclosed by {summary.get('fully_disclosed_by', [])} · "
+          f"{len(summary['combinations'])} combinations")
+    for e in errors[:30]:
+        print(f"  ERROR: {e}")
+    print("OK" if not errors else f"FAILED ({len(errors)} errors)")
+    return 1 if errors else 0
+
+
 def cmd_check(a):
     d = Path(a.dir)
     cand, screen = _load(d)
@@ -603,6 +657,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--window", type=int, default=5, help="years per comparison window (recent vs previous)")
     s.add_argument("--as-of", default="")
     s.set_defaults(fn=cmd_swot)
+
+    s = sub.add_parser("chart", help="claim chart: split a claim into elements and pick the closest earlier documents")
+    s.add_argument("dir")
+    s.add_argument("--target", required=True, help="application number of the claim to chart")
+    s.add_argument("--claim", type=int, default=1)
+    s.add_argument("--k", type=int, default=8, help="most similar earlier documents to chart")
+    s.add_argument("--examiner", action="store_true", help="also include KR documents the examiner cited (search calls)")
+    s.add_argument("--fetch-claims", action="store_true", help="fetch claims of prior-art documents (2 calls each)")
+    s.add_argument("--budget", type=int, default=40)
+    s.add_argument("--cache", default=".park/kipris_cache.sqlite")
+    s.set_defaults(fn=cmd_chart)
+
+    s = sub.add_parser("merge-chart", help="verify chart quotes and summarise (charts/<target>_c<n>/done.jsonl)")
+    s.add_argument("dir")
+    s.add_argument("--target", required=True)
+    s.add_argument("--claim", type=int, default=1)
+    s.set_defaults(fn=cmd_merge_chart)
 
     s = sub.add_parser("rank", help="pre-rank candidates by similarity to TECH_TREE.md (screen in this order)")
     s.add_argument("dir")

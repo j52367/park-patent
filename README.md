@@ -52,6 +52,7 @@ Claude Code에서:
 | `/park-report` | 해석 작성(숫자는 자리표시자) + REPORT.html |
 | `/key-patent-review` | 2단계: 청구항 원문으로 핵심·주목·일반 판정 |
 | `/ip-strategy` | 2단계: 특허 기반 SWOT와 전략 제안 |
+| `/claim-chart-kr` | 2단계: 청구항 대비표 (신규성·진보성) |
 
 ## KIPRIS Plus API
 
@@ -72,6 +73,7 @@ Claude Code에서:
 | `park shortlist` / `enrich` | 2단계 대상 압축, 청구항·피인용·법적상태 수집 (문헌당 호출 2회) |
 | `park review-batches` / `merge-review` | 핵심특허 판정 배치, 청구항 인용 검증 |
 | `park swot` | 초점 출원인 대 경쟁 출원인 집계와 SWOT 후보 |
+| `park chart` / `merge-chart` | 청구항 대비표: 구성요소 분할, 선행문헌 선정, 인용 검증 |
 | `park map <dir>` | 집계(`map/stats.json`)와 SVG 차트 |
 | `park check <dir>` | 인용 검증, 분류 코드 검증, 보고서 숫자 검사 |
 | `park report <dir>` | REPORT.html |
@@ -87,7 +89,8 @@ Claude Code에서:
 - [x] 선택 백엔드: Codex CLI 병렬 선별 (`scripts/codex-screen.sh`)
 - [x] 정렬 실험: 판정 학습 정렬(CPU)이 다국어 임베딩보다 낫다 → `park rank --learn` ([기록](docs/experiments/2026-11-09_ranking.md))
 - [x] 2단계: 압축 목록 → 청구항·피인용 수집 → 청구항 원문 기반 핵심특허 판정(인용 검증) → 특허 기반 SWOT, 보고서에 핵심특허 표와 SWOT 절
-- [ ] 청구항 대비표(신규성·진보성·침해), 해외 특허(KIPRIS 해외특허 API)
+- [x] 청구항 대비표: 신규성·진보성 (구성요소 분할 → 기준일 이전 문헌·심사관 인용 → 문헌 × 구성요소 판정, 인용 검증)
+- [ ] 침해·회피설계 대비표, 명세서 본문 대조, 해외 특허(KIPRIS 해외특허 API)
 - [ ] 1단계: 실제 과제 1건 완주, 사전 정렬(BM25/임베딩)
 - [ ] 2단계: 핵심특허 전문 검토, 청구항 대비(신규성·진보성·침해), 무효 공방, 전략, 해외 문헌
 - [ ] 3단계: 한국어 특허 검색 모델, KR 무효 근거 벤치마크

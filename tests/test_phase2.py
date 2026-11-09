@@ -121,3 +121,29 @@ def test_swot_hints_and_report_section(tmp_path):
     assert main(["report", str(d), "--strict"]) == 0
     html = (d / "REPORT.html").read_text(encoding="utf-8")
     assert "SWOT · 특허 전략" in html and "가람연구원의 유효특허는 3건입니다" in html
+
+
+def test_claim_split_and_chart_merge(tmp_path):
+    from park import chart
+    els = chart.split_elements("1. 탄성 부재;상기 탄성 부재가 부착되는 기판; 및상기 기판 위의 전극을 포함하는 것을 특징으로 하는 감지 장치.")
+    assert [e["id"] for e in els] == ["E0", "E1", "E2", "E3"] and els[0]["text"] == "감지 장치"
+    assert els[2]["text"] == "상기 탄성 부재가 부착되는 기판"
+
+    d, cand, scr = _project(tmp_path)
+    target, earlier = cand["application_no"].iloc[-1], cand["application_no"].iloc[0]
+    enrich(FakeClient(), [target, earlier], d, log=lambda *_: None)
+    out = chart.prepare(d, target, 1, k=3, examiner_apps=[earlier])
+    pa = pd.read_csv(out / "prior_art.csv", dtype=str)
+    assert earlier in set(pa["application_no"]) and target not in set(pa["application_no"])
+    chart.make_todo(d, out)
+    assert "## 구성요소" in (out / "todo.md").read_text(encoding="utf-8")
+    rows = [
+        {"prior_art": earlier, "element": "E1", "status": "개시", "location": "청구항 1", "quote": "탄성층과 상기 탄성층 아래의"},
+        {"prior_art": earlier, "element": "E0", "status": "개시", "location": "청구항 3", "quote": "탄성층과 상기 탄성층"},  # quote is from claim 1
+        {"prior_art": earlier, "summary": "s", "novelty": "유지"},
+        {"combination": [earlier, target], "covers": {}, "motivation": "m", "weakness": "w"},
+    ]
+    (out / "done.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
+    summary, errors = chart.merge(d, out)
+    assert len(errors) == 1 and "E0" in errors[0]
+    assert len(summary["summaries"]) == 1 and len(summary["combinations"]) == 1

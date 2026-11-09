@@ -159,6 +159,57 @@ def _legend(stats: dict) -> str:
     return " · ".join(f"{k}={v}" for k, v in labels.items())
 
 
+def _chart_html(d: Path) -> str:
+    """Claim charts (charts/*/summary.json + chart.csv) as document × element tables."""
+    import pandas as pd
+
+    out = []
+    for sp in sorted((d / "charts").glob("*/summary.json")) if (d / "charts").exists() else []:
+        sm = json.loads(sp.read_text(encoding="utf-8"))
+        cdir = sp.parent
+        ch = pd.read_csv(cdir / "chart.csv", dtype=str, keep_default_na=False) if (cdir / "chart.csv").exists() else None
+        pa = pd.read_csv(cdir / "prior_art.csv", dtype=str, keep_default_na=False) if (cdir / "prior_art.csv").exists() else None
+        els = sm["elements"]
+        mark = {"개시": "●", "일부": "◐", "미개시": "○"}
+        head = "".join(f"<th title='{escape(e['text'])}'>{escape(e['id'])}</th>" for e in els)
+        rows = ""
+        if ch is not None and pa is not None:
+            for _, r in pa.iterrows():
+                no = r["application_no"]
+                cells = ""
+                for e in els:
+                    hit = ch[(ch["prior_art"] == no) & (ch["element"] == e["id"])]
+                    if len(hit):
+                        h = hit.iloc[0]
+                        tip = f"{h.get('location', '')}: {h.get('quote', '')} — {h.get('note', '')}"
+                        cells += f"<td class='num' title='{escape(tip)}'>{mark.get(h['status'], '?')}</td>"
+                    else:
+                        cells += "<td class='num'>·</td>"
+                tag = " (심사관 인용)" if r.get("examiner_cited") == "True" else ""
+                rows += (f"<tr><td>{escape(no)}{tag}</td><td>{escape(r['title'])}</td><td class='num'>{escape(r['application_date'][:4])}</td>"
+                         f"<td class='num'>{escape(r['sim_rank'])}</td>{cells}</tr>")
+        el_list = "".join(f"<li><b>{escape(e['id'])}</b> {escape(e['text'])}</li>" for e in els)
+        summ = "".join(f"<li><b>{escape(x['prior_art'])}</b> [{escape(x.get('novelty', ''))}] {escape(x.get('summary', ''))}</li>"
+                       for x in sm.get("summaries", []))
+        combos = "".join(f"<li><b>{escape(' + '.join(x.get('combination', [])))}</b>: {escape(x.get('motivation', ''))} "
+                         f"<i>약점: {escape(x.get('weakness', ''))}</i></li>" for x in sm.get("combinations", []))
+        full = sm.get("fully_disclosed_by", [])
+        verdict = (f"단일 문헌으로 모든 구성요소가 개시된 문헌: {escape(', '.join(full))}" if full
+                   else "모든 구성요소를 개시한 단일 문헌은 대비한 문헌 중에 없었습니다 (신규성 부정 근거 없음).")
+        out.append(f"<h3>{escape(sm['target'])} 청구항 {sm['claim_no']} (기준일 {escape(sm['priority_date'])})</h3>"
+                   f"<ul>{el_list}</ul><p class='sub'>● 개시 · ◐ 일부 · ○ 미개시 — 칸에 마우스를 올리면 근거 인용이 보입니다. "
+                   "'유사도 순위'는 PARK 선행문헌 검색에서의 순위입니다.</p>"
+                   f"<table><thead><tr><th>선행문헌</th><th>명칭</th><th>연도</th><th>유사도 순위</th>{head}</tr></thead>"
+                   f"<tbody>{rows}</tbody></table><p>{verdict}</p>"
+                   + (f"<h3>문헌별 요약</h3><ul>{summ}</ul>" if summ else "")
+                   + (f"<h3>진보성 결합 논리 (초안)</h3><ul>{combos}</ul>" if combos else ""))
+    if not out:
+        return ""
+    return ("<h2>청구항 대비</h2><p class='notice'>대비 대상은 KR 공개특허 중 기준일 이전 문헌뿐이고, "
+            "각 문헌의 <b>요약과 청구항만</b> 대조했습니다(명세서 본문·도면 미포함). 본문이나 도면에만 있는 구성은 "
+            "'일부'나 '미개시'로 남았을 수 있습니다. 신규성·진보성 판단 초안이며 법률 의견이 아닙니다.</p>" + "".join(out))
+
+
 def _key_table(d: Path) -> str:
     """Key patents from key_review.csv (+ shortlist/enrich for context)."""
     import pandas as pd
@@ -280,6 +331,7 @@ def build(analysis_dir: str | Path, title: str | None = None) -> tuple[Path, lis
 <table><thead><tr><th>상태</th><th>건수</th></tr></thead><tbody>{status_rows}</tbody></table>
 <p class="sub">{escape(_status_note(meta))}</p>
 {_key_table(d)}
+{_chart_html(d)}
 {swot_html}
 <h2>검색 범위</h2>
 {md_to_html(search_log, shift=2) if search_log else '<p class="notice">SEARCH_LOG.md가 없습니다. 검색 범위를 알 수 없는 보고서는 결론에 쓰지 마세요.</p>'}
