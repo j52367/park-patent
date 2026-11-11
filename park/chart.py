@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .checks import _claim_text, _squash
+from .checks import _squash, claims_by_number, load_claims
 from .normalize import norm_date
 
 STATUS = {"개시", "일부", "미개시"}
@@ -32,9 +32,9 @@ STATUS = {"개시", "일부", "미개시"}
 def split_elements(claim: str) -> list[dict]:
     body = re.sub(r"^\s*\d+\s*\.\s*", "", claim).strip()
     preamble = ""
-    # "…을 포함하는 (것을 특징으로 하는) 촉각센서." — a short subject at the very end
+    # "…을 포함하는 (것을 특징으로 하는) 압력센서." — a short subject at the very end
     m = re.search(r"(?:을|를)\s*포함하는\s*(?:것을\s*특징으로\s*하는\s*)?([^;,.]{1,40}?)\s*\.?\s*$", body)
-    if not m:  # "…를 포함하는, 탄성 촉각 센서." (subject after a comma)
+    if not m:  # "…를 포함하는, 정전용량형 압력 센서." (subject after a comma)
         m = re.search(r"(?<=하는|되는|있는),\s*([^;,.]{1,30}?)\s*\.?\s*$", body)
     if m:
         preamble = m.group(1).strip()
@@ -53,12 +53,11 @@ def _doc_text(r, fulltext: Path) -> str:
 
 
 def prepare(d: Path, target: str, claim_no: int = 1, k: int = 8, examiner_apps: list[str] | None = None,
-            include: list[str] | None = None) -> Path:
+            include: list[str] | None = None, resplit: bool = False) -> Path:
     from sklearn.feature_extraction.text import TfidfVectorizer
 
     det = json.loads((d / "details" / f"{target}.json").read_text(encoding="utf-8"))
-    claims = "\n".join(det.get("claims", []))
-    claim = _claim_text(claims, claim_no)
+    claim = claims_by_number(det.get("claims", [])).get(claim_no)
     if not claim:
         raise ValueError(f"claim {claim_no} not found for {target}")
     pri = sorted(norm_date(p.get("date")) for p in det.get("priority", []) if p.get("date"))
@@ -75,21 +74,41 @@ def prepare(d: Path, target: str, claim_no: int = 1, k: int = 8, examiner_apps: 
     examiner = set(examiner_apps or [])
     pool["examiner_cited"] = pool["application_no"].isin(examiner)
     pool["user_included"] = pool["application_no"].isin(set(include or []))
-    chosen = pool[(pool["sim_rank"] <= k) | pool["examiner_cited"] | pool["user_included"]]
+    chosen = pool[(pool["sim_rank"] <= k) | pool["examiner_cited"] | pool["user_included"]].copy()
+    chosen["art_type"] = [_art_type(d, r, cutoff) for _, r in chosen.iterrows()]
 
     out = d / "charts" / f"{target}_c{claim_no}"
     out.mkdir(parents=True, exist_ok=True)
     els = split_elements(claim)
+    old = out / "elements.json"
+    if old.exists() and not resplit:  # keep a split the user corrected by hand
+        prev = json.loads(old.read_text(encoding="utf-8"))
+        if prev.get("target") == target and prev.get("claim_no") == claim_no and prev.get("elements"):
+            els = prev["elements"]
     (out / "elements.json").write_text(json.dumps({"target": target, "claim_no": claim_no, "claim": claim,
                                                    "priority_date": cutoff, "elements": els},
                                                   ensure_ascii=False, indent=1), encoding="utf-8")
     (out / "ELEMENTS.md").write_text(
         f"# 대상 청구항 — {target} 청구항 {claim_no} (기준일 {cutoff})\n\n> {claim}\n\n"
         "| 구성요소 | 내용 |\n|---|---|\n" + "".join(f"| {e['id']} | {e['text']} |\n" for e in els)
-        + "\n구성요소 분할이 맞는지 확인하고, 필요하면 elements.json을 고친 뒤 다시 배치를 만드세요.\n", encoding="utf-8")
+        + "\n구성요소 분할이 맞는지 확인하고, 필요하면 elements.json을 고친 뒤 `park chart`를 다시 실행하세요"
+          " (고친 분할은 유지됩니다. 자동 분할로 되돌리려면 --resplit).\n", encoding="utf-8")
     chosen[["application_no", "title", "applicants", "application_date", "similarity", "sim_rank",
-            "examiner_cited"]].to_csv(out / "prior_art.csv", index=False, encoding="utf-8-sig")
+            "examiner_cited", "art_type"]].to_csv(out / "prior_art.csv", index=False, encoding="utf-8-sig")
     return out
+
+
+def _art_type(d: Path, r, cutoff: str) -> str:
+    """공지 문헌 (published before the reference date, 특허법 제29조 제1항) vs earlier-filed but later-published
+    application (확대된 선출원, 제29조 제3항 — only the identical invention counts) vs unknown publication date."""
+    pub = norm_date(r.get("publication_date", ""))
+    if not pub:
+        det = d / "details" / f"{r['application_no']}.json"
+        if det.exists():
+            pub = norm_date(json.loads(det.read_text(encoding="utf-8")).get("publication_date", ""))
+    if not pub:
+        return "공개일 미상"
+    return "공지" if pub < cutoff else "확대된 선출원"
 
 
 def relevant_paragraphs(spec: dict, elements: list[dict], per_element: int = 4, limit: int = 7000) -> list[tuple[str, str]]:
@@ -143,6 +162,10 @@ def merge(d: Path, out: Path) -> tuple[dict, list[str]]:
     meta = json.loads((out / "elements.json").read_text(encoding="utf-8"))
     ids = {e["id"] for e in meta["elements"]}
     cand = pd.read_csv(d / "candidates.csv", dtype=str, keep_default_na=False).set_index("application_no")
+    pa_path = out / "prior_art.csv"
+    allowed = set(pd.read_csv(pa_path, dtype=str)["application_no"]) if pa_path.exists() else set()
+    art_type = (dict(zip(*[pd.read_csv(pa_path, dtype=str, keep_default_na=False)[c] for c in ("application_no", "art_type")]))
+                if pa_path.exists() and "art_type" in pd.read_csv(pa_path, nrows=0).columns else {})
     rows, summaries, combos, errors = [], [], [], []
     for line in (out / "done.jsonl").read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -155,18 +178,36 @@ def merge(d: Path, out: Path) -> tuple[dict, list[str]]:
             summaries.append(o)
             continue
         rows.append(o)
+    from collections import Counter
+
+    dup = Counter((str(o.get("prior_art", "")), o.get("element", "")) for o in rows)
+    bad: set[tuple] = set()
+
+    def fail(key, msg):
+        errors.append(f"{key[0]}/{key[1]}: {msg}")
+        bad.add(key)
+
     for o in rows:
         no, el = str(o.get("prior_art", "")), o.get("element", "")
-        where = f"{no}/{el}"
+        key = (no, el)
+        if dup[key] > 1:
+            fail(key, "judged more than once — keep exactly one row per document and element")
+            continue
+        if no == meta["target"]:
+            fail(key, "the target itself cannot be prior art")
+            continue
+        if allowed and no not in allowed:
+            fail(key, "not one of the documents in prior_art.csv")
+            continue
         if el not in ids:
-            errors.append(f"{where}: unknown element")
+            fail(key, "unknown element")
         if o.get("status") not in STATUS:
-            errors.append(f"{where}: status '{o.get('status')}' not in {sorted(STATUS)}")
+            fail(key, f"status '{o.get('status')}' not in {sorted(STATUS)}")
         if o.get("status") == "미개시":
             continue
         loc, quote = str(o.get("location", "")), _squash(o.get("quote", ""))
         if no not in cand.index:
-            errors.append(f"{where}: not a candidate")
+            fail(key, "not a candidate")
             continue
         para = re.search(r"\[?(\d{4})\]?", loc) if ("[" in loc or "단락" in loc) else None
         if para:
@@ -176,24 +217,39 @@ def merge(d: Path, out: Path) -> tuple[dict, list[str]]:
             ok = sp.exists() and len(quote) >= 6 and quote_in_paragraph(
                 json.loads(sp.read_text(encoding="utf-8")), para.group(1), o.get("quote", ""))
             if not ok:
-                errors.append(f"{where}: quote not found in description paragraph {para.group(1)} (±1)")
+                fail(key, f"quote not found in description paragraph {para.group(1)} (±1)")
             continue
         if "청구항" in loc:
-            ft = d / "fulltext" / f"{no}.txt"
+            claims = load_claims(d, no)
             m = re.search(r"\d+", loc)
-            src = _claim_text(ft.read_text(encoding="utf-8"), int(m.group(0))) if (ft.exists() and m) else None
+            src = claims.get(int(m.group(0))) if (claims and m) else None
         elif "요약" in loc:
             src = cand.loc[no, "abstract"]
         else:
             src = f"{cand.loc[no, 'title']} {cand.loc[no, 'abstract']}"
         if src is None or len(quote) < 6 or quote not in _squash(src):
-            errors.append(f"{where}: quote not found verbatim in {loc or 'the document'}")
-    chart = pd.DataFrame(rows)
+            fail(key, f"quote not found verbatim in {loc or 'the document'}")
+    ok_combos = []
+    for c in combos:
+        docs = [str(x) for x in c.get("combination", [])]
+        wrong = [x for x in docs if x == meta["target"] or (allowed and x not in allowed)]
+        if wrong:
+            errors.append(f"combination {'+'.join(docs)}: {', '.join(wrong)} is the target or not in prior_art.csv")
+        else:
+            ok_combos.append(c)
+    combos = ok_combos
+    # conclusions use verified rows only
+    chart = pd.DataFrame([o for o in rows if (str(o.get("prior_art", "")), o.get("element", "")) not in bad])
     chart.to_csv(out / "chart.csv", index=False, encoding="utf-8-sig")
     summary = {"target": meta["target"], "claim_no": meta["claim_no"], "priority_date": meta["priority_date"],
                "elements": meta["elements"], "summaries": summaries, "combinations": combos}
     if len(chart):
         disclosed = chart[chart["status"] == "개시"].groupby("prior_art")["element"].nunique()
-        summary["fully_disclosed_by"] = [no for no, n in disclosed.items() if n == len(ids)]
+        full = [no for no, n in disclosed.items() if n == len(ids)]
+        # novelty (제29조 제1항) needs a document published before the reference date
+        summary["fully_disclosed_by"] = [no for no in full if art_type.get(no, "공지") == "공지"]
+        summary["fully_disclosed_earlier_application"] = [no for no in full if art_type.get(no) == "확대된 선출원"]
+        summary["fully_disclosed_unknown_date"] = [no for no in full if art_type.get(no) == "공개일 미상"]
+    summary["errors"] = len(errors)
     (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=1), encoding="utf-8")
     return summary, errors

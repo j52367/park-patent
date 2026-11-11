@@ -24,6 +24,9 @@ allowed-tools: Bash(park *), Bash(python -m park *), Read, Write, Edit, Glob, Gr
 - `PROJECT` — `$ARGUMENTS`의 `project:` 값, 없으면 과제명을 영문 소문자-하이픈으로 줄여 만든다.
 - `DIR = analysis/<PROJECT>`
 - `AUTO_PROCEED = false` — 사용자가 "자동으로", "묻지 말고"라고 하지 않는 한 확인 단계에서 멈춘다.
+  - `true`일 때는 확인 단계뿐 아니라 하위 스킬의 "사용자에게 묻는다" 항목도 묻지 않는다. 대신 범위를 덜 넓히는 보수적인 기본값을 고른다 (예: 계열사를 합치지 않음, 분류표를 고치지 않음, 호출 수를 늘리지 않음).
+  - 그렇게 정한 것은 `BRIEF.md`의 `## 자동 진행 결정` 아래에 한 줄씩 적고, 마지막 보고에서 사용자에게 알린다.
+  - 사용자 허락이 필요한 것(기밀을 외부 모델로 보내기, KIPRIS 계정 작업)은 `true`여도 하지 않는다.
 
 ## 0단계: 준비
 
@@ -41,6 +44,7 @@ allowed-tools: Bash(park *), Bash(python -m park *), Read, Write, Edit, Glob, Gr
 ## ② 후보 수집
 
 `/kipris-search` 실행 (CSV면 그 스킬의 반입 절차를 따른다). 후보 건수, 사용한 호출 수, 알려진 핵심특허가 포함됐는지를 보고하고 **확인 ②**를 받는다.
+CSV 경로에서도 `QUERIES.md`는 만든다. 사용자가 KIPRIS 웹이나 상용 DB에 넣을 검색식이 되고, 실제로 쓴 검색식과 다르면 `SEARCH_LOG.md`에 실제 식을 적는다.
 
 ## ③ 관련성 선별
 

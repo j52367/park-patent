@@ -27,7 +27,8 @@ from .stats import UNPUBLISHED_MONTHS, _months_before
 def compute(candidates: pd.DataFrame, screening: pd.DataFrame, focal: str, competitors: list[str],
             as_of: str = "", window: int = 5, key_review: pd.DataFrame | None = None,
             enrich: pd.DataFrame | None = None, tech_labels: dict | None = None) -> dict:
-    valid = screening[screening["relevance"] == "valid"][["application_no", "tech_code"]]
+    latest = screening.drop_duplicates("application_no", keep="last")  # the last judgement wins
+    valid = latest[latest["relevance"] == "valid"][["application_no", "tech_code"]]
     pop = candidates.merge(valid, on="application_no", how="inner")
     pop["year"] = pd.to_datetime(pop["application_date"], errors="coerce").dt.year
     as_of_d = date.fromisoformat(as_of) if as_of else date.today()

@@ -63,8 +63,11 @@ def paragraph_window(spec: dict, number: str, radius: int = 1) -> str:
 
 
 def quote_in_paragraph(spec: dict, number: str, quote: str) -> bool:
+    """The cited paragraph must exist; the quote may sit in it or a neighbour (margin numbers drift)."""
     q = _squash(quote)
-    return bool(q) and q in _squash(paragraph_window(spec, number))
+    if not q or f"{int(number):04d}" not in spec.get("paragraphs", {}):
+        return False
+    return q in _squash(paragraph_window(spec, number))
 
 
 def fetch(client, application_no: str, out_dir: Path, prefer: str = "ann") -> dict | None:

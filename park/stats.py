@@ -3,7 +3,8 @@
 Counting rules (docs/DESIGN.md §5.2):
   * one row per application number (dedupe happens at ingest)
   * co-applicants: full counting — each applicant gets 1 for a shared application
-  * the last ~18 months before `as_of` are marked incomplete (many applications are not yet published)
+  * the last ~18 months before `as_of` are marked incomplete (many applications are not yet published);
+    a year counts as incomplete only if at least INCOMPLETE_MIN_DAYS of it fall inside that window
   * the growth-stage chart is a reference indicator only
 """
 
@@ -17,6 +18,7 @@ import pandas as pd
 from .normalize import split_multi
 
 UNPUBLISHED_MONTHS = 18
+INCOMPLETE_MIN_DAYS = 30
 COUNTRY_ORDER = ["KR", "US", "JP", "CN", "EP", "WO"]
 
 
@@ -31,7 +33,8 @@ def wilson(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return max(0.0, centre - half), min(1.0, centre + half)
 
 
-def coverage(candidates: pd.DataFrame, screening: pd.DataFrame | None) -> dict:
+def coverage(candidates: pd.DataFrame, screening: pd.DataFrame | None,
+             frames: dict[int, set[str]] | None = None) -> dict:
     """How much of the candidate set was screened, and what the tail sample says about the rest.
 
     Tail-audit rows (screened_by contains 'tail-audit') are a random sample of documents below the
@@ -51,13 +54,41 @@ def coverage(candidates: pd.DataFrame, screening: pd.DataFrame | None) -> dict:
         tail = tail[rounds == rounds.max()]
         out["tail_round"] = int(rounds.max())
     if len(tail):
-        k, n = int((tail["relevance"] == "valid").sum()), int(len(tail))
-        lo, hi = wilson(k, n)
-        # the sample was drawn from (unscreened + sample) documents
-        frame = n_uns + n
-        out.update({"tail_sample": n, "tail_valid": k,
-                    "tail_est_valid": round(k / n * n_uns), "tail_est_low": round(lo * n_uns),
-                    "tail_est_high": round(hi * n_uns), "tail_frame": frame})
+        k = int((tail["relevance"] == "valid").sum())
+        u = int((tail["relevance"] == "undecided").sum())
+        n = int(len(tail))
+        n_dec = n - u
+        # the estimate applies only to the documents the sample was drawn from (its frame)
+        frame = (frames or {}).get(out["tail_round"])
+        if frame is not None:
+            left = len(frame - screened)
+        else:
+            left = n_uns
+        p = k / n_dec if n_dec else 0.0
+        lo, _ = wilson(k, n_dec) if n_dec else (0.0, 0.0)
+        _, hi = wilson(k + u, n)  # undecided sample documents counted as relevant for the upper bound
+        out.update({"tail_sample": n, "tail_valid": k, "tail_undecided": u,
+                    "tail_est_valid": round(p * left), "tail_est_low": round(lo * left),
+                    "tail_est_high": round(hi * left), "tail_frame_left": left,
+                    "n_unscreened_outside_frame": max(n_uns - left, 0) if frame is not None else 0})
+    na = screening[screening["screened_by"].astype(str).str.contains("noise-audit")] \
+        if "screened_by" in screening else screening.iloc[0:0]
+    if len(na):
+        flipped = int((na["relevance"] == "valid").sum())
+        m = int(len(na))
+        n_noise = int((screening["relevance"] == "noise").sum()) + flipped  # noise pile before the re-check
+        n_valid = int((screening["relevance"] == "valid").sum()) - flipped
+        r = flipped / m
+        census = m >= n_noise
+        lo_r, hi_r = (r, r) if census else wilson(flipped, m)
+
+        def fnr(rate):
+            missed = rate * n_noise
+            return round(missed / (n_valid + missed), 4) if (n_valid + missed) else 0.0
+
+        out.update({"noise_audit_n": m, "noise_audit_flipped": flipped, "noise_audit_census": census,
+                    "noise_miss_rate": round(r, 4), "est_fnr": fnr(r), "est_fnr_low": fnr(lo_r),
+                    "est_fnr_high": fnr(hi_r)})
     return out
 
 
@@ -88,7 +119,7 @@ def population(candidates: pd.DataFrame, screening: pd.DataFrame | None):
 
 
 def compute(candidates: pd.DataFrame, screening: pd.DataFrame | None = None, as_of: str = "",
-            top_n: int = 15, growth_period: int = 2) -> dict:
+            top_n: int = 15, growth_period: int = 2, frames: dict[int, set[str]] | None = None) -> dict:
     pop, basis = population(candidates, screening)
     as_of_d = date.fromisoformat(as_of) if as_of else date.today()
     cutoff = _months_before(as_of_d, UNPUBLISHED_MONTHS)
@@ -105,8 +136,8 @@ def compute(candidates: pd.DataFrame, screening: pd.DataFrame | None = None, as_
             yearly.append({
                 "year": y,
                 "count": int(counts.get(y, 0)),
-                # any part of the year falls inside the unpublished window
-                "incomplete": date(y, 12, 31) > cutoff,
+                # at least ~a month of the year inside the unpublished window
+                "incomplete": (date(y, 12, 31) - cutoff).days >= INCOMPLETE_MIN_DAYS,
             })
 
     app_counter: Counter = Counter()
@@ -145,7 +176,7 @@ def compute(candidates: pd.DataFrame, screening: pd.DataFrame | None = None, as_
             "unpublished_cutoff": cutoff.isoformat(),
             "n_applicants": len(app_counter),
             "counting": "full counting (each co-applicant +1)",
-            **coverage(candidates, screening),
+            **coverage(candidates, screening, frames),
         },
         "yearly": yearly,
         "applicants_top": applicants_top,
@@ -217,6 +248,6 @@ def _growth(dated: pd.DataFrame, period: int, cutoff: date) -> list[dict]:
             "period": f"{start}" if start == end else f"{start}–{end}",
             "applications": int(len(part)),
             "applicants": len(names),
-            "incomplete": date(end, 12, 31) > cutoff,
+            "incomplete": (date(end, 12, 31) - cutoff).days >= INCOMPLETE_MIN_DAYS,
         })
     return out

@@ -6,7 +6,8 @@ screen the top → repeat, and check what is left with a random tail sample. In 
 multilingual embedding models on a random tail sample (AP 0.80 vs 0.47 for similarity ranking),
 on CPU in seconds. Needs scikit-learn (`pip install park-patent[learn]`).
 
-Probabilities from this model are NOT calibrated (labels come from the top of earlier rankings,
+Every document is ordered by the same full model; cross-validated (out-of-fold) scores are used
+only for rank_eval.json. Probabilities from this model are NOT calibrated (labels come from the top of earlier rankings,
 so the model over-estimates how much is left). Use it for ordering only; estimate the remainder
 with `park audit-sample`.
 """
@@ -55,8 +56,8 @@ def learn_rank(candidates: pd.DataFrame, screening: pd.DataFrame, folds: int = 5
     k = min(folds, int(y.sum()), int(len(y) - y.sum()))
     for tr, te in StratifiedKFold(k, shuffle=True, random_state=seed).split(li, y):
         oof[te] = model().fit(X[li[tr]], y[tr]).predict_proba(X[li[te]])[:, 1]
+    # ordering uses one model for every document; out-of-fold scores are only for the evaluation
     scores = model().fit(X[li], y).predict_proba(X)[:, 1]
-    scores[li] = oof  # a labelled doc is never scored by a model that saw its label
 
     tail = lab["screened_by"].astype(str).str.contains("tail-audit").to_numpy() \
         if "screened_by" in lab else np.zeros(len(y), bool)

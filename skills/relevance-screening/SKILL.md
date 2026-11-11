@@ -57,7 +57,7 @@ park audit-sample <DIR> --below-rank <출력된 최저 순위> --n 100 --round 3
 
 판정 규칙:
 - `relevance`: `valid` / `noise` / `undecided`. 정의만으로 결정이 안 되면 `undecided`. 억지로 고르지 않는다.
-- `tech_code`: `valid`일 때 필수. TECH_TREE.md에 있는 코드만 쓴다.
+- `tech_code`: `valid`일 때 필수. TECH_TREE.md에 있는 코드만 쓴다. `noise`와 `undecided`는 빈 문자열로 둔다.
 - `evidence_location`: 인용을 가져온 곳. `요약`, `명칭`, `서지`, 그리고 candidates.csv에 `independent_claims`가 있으면 `독립청구항`. `청구항 1`, `[0023]` 같은 위치는 `fulltext/<출원번호>.txt`가 있을 때만 쓸 수 있다 (`park check`가 그 위치의 원문과 대조한다).
 - `evidence_quote`: 판정 이유가 드러나는 구절(공백 제외 8자 이상)을 **원문에서 그대로 복사**한다. 노이즈 판정에도 근거를 단다 (예: 결제 서버에 관한 문헌이라는 구절).
 - `evidence_level`: 요약만 봤으므로 `provisional`.
@@ -83,15 +83,25 @@ park merge-screening <DIR>
 ## 4. 노이즈 재검토 (거짓음성 점검)
 
 ```bash
-park audit-sample <DIR> --n 30
+park audit-sample <DIR> --n 30      # → screening/todo/noise_audit.md (노이즈가 30건 이하면 전수)
 ```
 
-`AUDIT_SAMPLE.md`의 문헌을 **앞선 판정을 보지 않은 새 검토자**가 다시 판정한다. 새 서브에이전트를 쓰고, 사용자가 허락했다면 Codex 같은 다른 모델을 쓴다.
-두 지표를 구분한다 (`AUDIT_SAMPLE.md` 머리말에 실제 건수가 들어간 식이 있다).
+1. `noise_audit.md`의 문헌을 **앞선 판정을 보지 않은 검토자**가 다시 판정한다. 검토자는 다음 순서로 고른다.
+   - 새 서브에이전트. TECH_TREE.md, 이 판정 규칙, `noise_audit.md` 경로만 넘긴다.
+   - 사용자가 허락했다면 Codex 같은 다른 모델.
+   - 둘 다 쓸 수 없으면 같은 세션이 판정하되, `screening/done/`과 `screening.csv`를 다시 열지 않고 판정한다. 이때는 `SCREENING.md`에 "독립 검토 아님"이라고 적는다.
+2. 결과는 다른 배치와 같은 형식으로 `screening/done/noise_audit.jsonl`에 쓴다. `screened_by` 끝에 `:noise-audit`를 붙인다 (예: `"claude:noise-audit"`).
+3. `park merge-screening <DIR>`로 병합한다. 뒤집힌 문헌은 나중 판정이 이기므로 유효로 바뀐다.
+4. `park map <DIR>`이 `map/stats.json`의 `meta`에 아래 값을 계산해 넣는다. 손으로 계산하지 않는다.
+   - `noise_audit_n`, `noise_audit_flipped`: 표본 수, 유효로 뒤집힌 수
+   - `noise_miss_rate`: 노이즈 누락률
+   - `est_fnr`, `est_fnr_low`, `est_fnr_high`: 추정 거짓음성률과 95% 범위. 전수 재검토(`noise_audit_census`)면 범위가 없다.
+
+두 지표의 뜻:
 - **노이즈 누락률** r = 유효로 뒤집힌 수 ÷ 표본 수 — 노이즈 더미 안에 유효특허가 얼마나 섞였나.
 - **추정 거짓음성률** = (r × 노이즈 수) ÷ (유효 수 + r × 노이즈 수) — 유효특허 전체 중 놓친 비율. 노이즈가 유효보다 훨씬 많으면 r이 작아도 이 값은 클 수 있다.
 
-추정 거짓음성률이 10%를 넘으면 원인(분류표 정의가 좁음, 판정 습관)을 찾아 노이즈 전체를 다시 보거나 분류표를 고칠지 사용자와 정한다. 표본이 작으면(30건 미만) 추정이 거칠다는 점도 함께 적는다. 결과는 `SCREENING.md`에 적는다.
+추정 거짓음성률이 10%를 넘으면 원인(분류표 정의가 좁음, 판정 습관)을 찾아 노이즈 전체를 다시 보거나 분류표를 고칠지 사용자와 정한다. 표본이 작으면(30건 미만) 추정이 거칠다는 점도 함께 적는다. 결과는 `SCREENING.md`에 적는다 (stats.json 값을 옮겨 적는 것은 원칙 1에 맞다).
 
 ## 5. SCREENING.md와 보고
 

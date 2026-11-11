@@ -4,7 +4,7 @@ Read first:
 1. TECH_TREE.md — the technology classification (codes, with 정의/포함/제외 and priority rules). This is the ONLY judgement standard.
 2. The batch files assigned to you below, in screening/todo/.
 
-For EVERY document (### <application_no>) in each assigned batch, append one JSON object per line to screening/done/<batch-name>.jsonl (e.g. screening/done/batch_003.jsonl; for tail_audit.md use screening/done/tail_audit.jsonl). Keys:
+For EVERY document (### <application_no>) in each assigned batch, append one JSON object per line to screening/done/<batch-name>.jsonl (e.g. screening/done/batch_003.jsonl; for tail_audit.md use screening/done/tail_audit.jsonl, for noise_audit.md screening/done/noise_audit.jsonl). Keys:
 {"application_no": "...", "relevance": "valid|noise|undecided", "tech_code": "<code or empty>", "evidence_level": "provisional", "evidence_location": "요약|명칭", "evidence_quote": "...", "rationale": "<한국어 한 문장>", "screened_by": "codex:gpt-6.1-sol<SUFFIX>"}
 
 Rules:

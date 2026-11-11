@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "park-patent"
-version = "0.0.1"
+version = "0.1.0"
 description = "Evidence-checked Korean patent analysis: landscape reports, key patents, SWOT and claim charts with Claude Code skills and a deterministic CLI"
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -23,11 +23,15 @@ dev = ["pytest>=8"]
 [project.scripts]
 park = "park.cli:main"
 
-[tool.setuptools.packages.find]
-include = ["park*"]
+[tool.setuptools]
+# the skills/ folder ships inside the wheel as park.skills so `park install-skills` works after pip install
+packages = ["park", "park.skills"]
+
+[tool.setuptools.package-dir]
+"park.skills" = "skills"
 
 [tool.setuptools.package-data]
-park = ["templates/*", "data/*"]
+"park.skills" = ["*/*.md", "*/*/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

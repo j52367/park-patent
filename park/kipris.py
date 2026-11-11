@@ -126,8 +126,8 @@ class KiprisClient:
             raise KiprisError(f"HTTP {resp.status_code} from {path}")
         body = resp.content
         code, msg = _result_code(body)
-        if not (code == "00" or (empty_code_ok and code == "" and not msg)):
-            raise KiprisError(f"KIPRIS resultCode={code}: {msg}")
+        if not (code == "00" or (empty_code_ok and code == "" and not msg and _looks_like_response(body))):
+            raise KiprisError(f"KIPRIS resultCode={code}: {msg or 'unexpected response'}")
         self._db.execute("INSERT OR REPLACE INTO responses VALUES (?,?,?,?,?)", (key, cache_path, public, body, now))
         self._db.commit()
         return body, now
@@ -267,6 +267,7 @@ def parse_detail(body: bytes) -> dict:
         "title": _txt(summ, "inventionTitle"),
         "claim_count": int(_txt(summ, "claimCount") or len(claims) or 0),
         "register_status": _txt(summ, "registerStatus"),
+        "publication_date": _txt(summ, "openDate") or _txt(summ, "publicationDate"),
         "register_number": _txt(summ, "registerNumber"),
         "final_disposal": _txt(summ, "finalDisposal"),
         "claims": claims,
@@ -285,16 +286,41 @@ def parse_detail(body: bytes) -> dict:
 DEPENDENT_RE = re.compile(r"(제\s*\d+\s*항|청구항\s*\d+|claim\s+\d+)", re.I)
 
 
-DELETED_RE = re.compile(r"^\s*\d+\s*\.\s*(삭제|\(삭제\)|deleted|canceled|cancelled)\s*\.?\s*$", re.I)
+DELETED_RE = re.compile(r"^\s*(삭제|\(삭제\)|deleted|canceled|cancelled)\s*\.?\s*$", re.I)
+_HEAD_RE = re.compile(r"^\s*(?:【\s*)?(?:청구항\s*)?\d{1,3}\s*(?:】|\.|\))?\s*")
 
 
 def independent_claims(claims: list[str]) -> list[str]:
-    """Claims that neither refer to another claim (in their opening words) nor were deleted."""
-    return [c for c in claims if not DELETED_RE.match(c) and not DEPENDENT_RE.search(c[:120])]
+    """Claims that neither refer to another claim (in their opening words) nor were deleted.
+
+    The claim's own heading ("1.", "청구항 1", "【청구항 1】") is removed before checking, so the
+    heading is not mistaken for a reference to another claim.
+    """
+    out = []
+    for c in claims:
+        body = _HEAD_RE.sub("", c, count=1)
+        if DELETED_RE.match(body) or DEPENDENT_RE.search(body[:120]):
+            continue
+        out.append(c)
+    return out
+
+
+def _looks_like_response(body: bytes) -> bool:
+    """An empty resultCode is only success for a real KIPRIS <response> with a <body> (not an HTML notice)."""
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return False
+    return root.tag == "response" and root.find("body") is not None
 
 
 def parse_citing(body: bytes) -> list[dict]:
     root = ET.fromstring(body)
-    return [{"citing_application_no": _txt(c, "ApplicationNumber"),
-             "type": _txt(c, "CitationLiteratureTypeCodeName")} for c in root.iter("citingInfo")
-            if _txt(c, "ApplicationNumber")]
+    seen: set[str] = set()
+    out = []
+    for c in root.iter("citingInfo"):
+        no = re.sub(r"\D", "", _txt(c, "ApplicationNumber"))
+        if no and no not in seen:  # the same citing application can appear once per citation type
+            seen.add(no)
+            out.append({"citing_application_no": no, "type": _txt(c, "CitationLiteratureTypeCodeName")})
+    return out

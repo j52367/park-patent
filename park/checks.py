@@ -58,9 +58,49 @@ def _source_text(src, location: str, fulltext: str):
     return None, f"evidence_location '{loc or '(empty)'}' needs full text (fulltext/<no>.txt) — "                  f"with abstract-only data use 요약 / 명칭 / 서지"
 
 
+CLAIM_HEAD = re.compile(r"^\s*(?:【\s*)?(?:청구항\s*)?(\d{1,3})\s*(?:】|\.|\))?\s*")
+
+
+def claims_by_number(claims: list[str]) -> dict[int, str]:
+    """{claim number: text} from a list where each item is one whole claim ("1. …", "청구항 1 …").
+
+    Items without a leading number are numbered by position. This avoids guessing claim
+    boundaries inside running text (where "설정값 10. 이하" is not claim 10).
+    """
+    out: dict[int, str] = {}
+    for i, c in enumerate(claims, 1):
+        m = CLAIM_HEAD.match(c)
+        n = int(m.group(1)) if (m and m.group(1)) else i
+        out.setdefault(n, c)
+    return out
+
+
+def load_claims(d, application_no: str) -> dict[int, str] | None:
+    """Claims of a document: details/<no>.json (one item per claim) or fulltext/<no>.txt."""
+    import json as _json
+    from pathlib import Path as _P
+
+    det = _P(d) / "details" / f"{application_no}.json"
+    if det.exists():
+        claims = _json.loads(det.read_text(encoding="utf-8")).get("claims", [])
+        if claims:
+            return claims_by_number(claims)
+    ft = _P(d) / "fulltext" / f"{application_no}.txt"
+    if ft.exists():
+        # one claim per line-start number; numbers inside sentences are not boundaries
+        parts = re.split(r"(?m)^(?=\s*\d{1,3}\s*\.\s)", ft.read_text(encoding="utf-8"))
+        return claims_by_number([p for p in parts if p.strip()])
+    return None
+
+
 def _claim_text(claims: str, n: int) -> str | None:
-    """Text of claim n from an independent-claims field like '1. … 10. …' (None if absent)."""
-    starts = [(int(m.group(1)), m.start()) for m in re.finditer(r"(?:^|(?<=\s))(\d{1,3})\.\s", claims)]
+    """Text of claim n from a one-string field like '1. … 10. …' (None if absent).
+
+    A claim number counts only at the start, after a line break, or after a sentence end,
+    so "설정값 10. 이하" inside a claim is not taken for claim 10.
+    """
+    starts = [(int(m.group(1)), m.start())
+              for m in re.finditer(r"(?:^|(?<=\n)|(?<=[.;:。]\s))(\d{1,3})\.\s", claims)]
     for i, (k, pos) in enumerate(starts):
         if k == n:
             end = starts[i + 1][1] if i + 1 < len(starts) else len(claims)
@@ -162,11 +202,15 @@ def check_screening(candidates: pd.DataFrame, screening: pd.DataFrame, tech_tree
     return res
 
 
+# method wording that contains a number but is not a count: "1건씩", "1건마다", "100%"
+_METHOD_PHRASE = re.compile(r"(?<![\d.,])1\s*건\s*(?:씩|마다)|(?<![\d.,])100\s*%")
+
+
 def lint_numbers(markdown: str) -> list[str]:
     """Lines that state counts/percentages without a {{placeholder}}."""
     hits = []
     for n, line in enumerate(markdown.splitlines(), 1):
-        stripped = _PLACEHOLDER.sub("", line)
+        stripped = _METHOD_PHRASE.sub("", _PLACEHOLDER.sub("", line))
         for m in _BARE_NUMBER.finditer(stripped):
             hits.append(f"line {n}: '{m.group(0)}' — use a {{{{stats...}}}} placeholder instead of a typed number")
     return hits

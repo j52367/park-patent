@@ -151,7 +151,10 @@ def cmd_map(a):
     d = Path(a.dir)
     cand, screen = _load(d)
     as_of = a.as_of or max([v for v in cand["status_as_of"] if v], default="") or date.today().isoformat()
-    s = stats.compute(cand, screen, as_of=as_of, top_n=a.top)
+    frames = {}
+    for f in (d / "screening").glob("tail_frame_r*.txt") if (d / "screening").exists() else []:
+        frames[int(re.search(r"r(\d+)", f.stem).group(1))] = set(f.read_text(encoding="utf-8").split())
+    s = stats.compute(cand, screen, as_of=as_of, top_n=a.top, frames=frames)
     tt = d / "TECH_TREE.md"
     if tt.exists():
         s["tech_labels"] = checks.tech_labels(tt.read_text(encoding="utf-8"))
@@ -315,6 +318,9 @@ def cmd_audit_sample(a):
                 f"추정 미선별 유효 건수 = (이 표본의 유효 수 / {k}) × {len(rest)}\n\n"
                 + "\n".join(_doc_block(r) for _, r in sample.iterrows()))
         (tdir / f"{name}.md").write_text(body, encoding="utf-8")
+        # remember which documents the sample describes, so the estimate is applied to this frame only
+        (d / "screening" / f"tail_frame_r{max(a.round, 1)}.txt").write_text(
+            "\n".join(rest["application_no"]), encoding="utf-8")
         print(f"wrote {tdir / (name + '.md')} ({k} of {len(rest)} unscreened docs)")
         return 0
     if screen is None:
@@ -325,14 +331,20 @@ def cmd_audit_sample(a):
     k = min(a.n, len(noise))
     sample = noise.sample(n=k, random_state=a.seed) if k else noise
     rows = cand[cand["application_no"].isin(sample["application_no"])]
-    body = (f"# 노이즈 재검토 표본 — {k}건 / 노이즈 {len(noise)}건 (seed {a.seed})\n\n"
-            "앞선 판정을 보지 말고 TECH_TREE.md만 기준으로 다시 판단하세요.\n\n"
+    tdir = d / "screening" / "todo"
+    tdir.mkdir(parents=True, exist_ok=True)
+    census = k == len(noise)
+    body = (f"# noise_audit — 노이즈 {len(noise)}건 중 {'전수' if census else '무작위'} {k}건 (seed {a.seed})\n\n"
+            "앞선 판정을 보지 말고 TECH_TREE.md만 기준으로 다시 판단하세요. 다른 배치와 같은 형식으로 "
+            "screening/done/noise_audit.jsonl에 쓰고, screened_by 뒤에 ':noise-audit'를 붙입니다.\n"
+            "병합 후 `park map`이 노이즈 누락률과 추정 거짓음성률을 계산합니다.\n\n"
             "- 노이즈 누락률 r = 유효로 뒤집힌 수 / 표본 수\n"
             f"- 추정 누락 건수 = r × {len(noise)} (노이즈 전체)\n"
             f"- 추정 거짓음성률 = 추정 누락 건수 / ({n_valid} + 추정 누락 건수)  ← 유효 판정 {n_valid}건 기준\n\n"
             + "\n".join(_doc_block(r) for _, r in rows.iterrows()))
-    (d / "AUDIT_SAMPLE.md").write_text(body, encoding="utf-8")
-    print(f"wrote {d / 'AUDIT_SAMPLE.md'} ({k} docs)")
+    (tdir / "noise_audit.md").write_text(body, encoding="utf-8")
+    (d / "AUDIT_SAMPLE.md").write_text(body, encoding="utf-8")  # kept for older instructions
+    print(f"wrote {tdir / 'noise_audit.md'} ({k} of {len(noise)} noise docs{', census' if census else ''})")
 
 
 def cmd_rank(a):
@@ -474,7 +486,7 @@ def cmd_chart(a):
         enrich(client, [a.target], d, budget=2)
     examiner = _resolve_examiner(client, d, a.target) if a.examiner else []
     out = chart.prepare(d, a.target, a.claim, k=a.k, examiner_apps=examiner,
-                        include=[x.strip() for x in a.include.split(",") if x.strip()])
+                        include=[x.strip() for x in a.include.split(",") if x.strip()], resplit=a.resplit)
     pa = read_csv(out / "prior_art.csv")
     missing = [n for n in pa["application_no"] if not (d / "fulltext" / f"{n}.txt").exists()]
     if missing and a.fetch_claims:
@@ -545,13 +557,29 @@ def cmd_report(a):
     return 1 if (problems and a.strict) else 0
 
 
+def _skills_source() -> Path | None:
+    """Skills shipped in the wheel (park/skills) or, in a git checkout, the repo's skills/ folder."""
+    for cand in (Path(__file__).resolve().parent / "skills", Path(__file__).resolve().parent.parent / "skills"):
+        if cand.is_dir() and any(cand.glob("*/SKILL.md")):
+            return cand
+    try:
+        from importlib.resources import files
+
+        p = Path(str(files("park.skills")))
+        if any(p.glob("*/SKILL.md")):
+            return p
+    except (ModuleNotFoundError, TypeError):
+        pass
+    return None
+
+
 def cmd_install_skills(a):
     """Copy skills/ (each skill + shared-references) into a Claude Code skills directory."""
     import shutil
 
-    src = Path(__file__).resolve().parent.parent / "skills"
-    if not src.exists():
-        print(f"skills folder not found next to the package ({src}); run from a git checkout", file=sys.stderr)
+    src = _skills_source()
+    if src is None:
+        print("skills folder not found (neither in the installed package nor next to it)", file=sys.stderr)
         return 2
     dest = Path.home() / ".claude" / "skills" if a.user else Path(a.project) / ".claude" / "skills"
     dest.mkdir(parents=True, exist_ok=True)
@@ -674,6 +702,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--k", type=int, default=8, help="most similar earlier documents to chart")
     s.add_argument("--examiner", action="store_true", help="also include KR documents the examiner cited (search calls)")
     s.add_argument("--include", default="", help="comma-separated application numbers to chart in any case")
+    s.add_argument("--resplit", action="store_true", help="discard a hand-edited elements.json and split the claim again")
     s.add_argument("--fetch-claims", action="store_true", help="fetch claims of prior-art documents (2 calls each)")
     s.add_argument("--fulltext", action="store_true",
                    help="download specification PDFs and add the most relevant paragraphs (1-2 calls + 1 download each)")

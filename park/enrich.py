@@ -25,7 +25,8 @@ STATUS_WEIGHT = {"등록": 1.0, "공개": 0.8, "소멸": 0.6, "거절": 0.3, "�
 
 def shortlist(candidates: pd.DataFrame, screening: pd.DataFrame, rank: pd.DataFrame | None,
               focal: list[str], n: int = 300, per_code: int = 12) -> pd.DataFrame:
-    valid = screening[screening["relevance"] == "valid"][["application_no", "tech_code"]]
+    latest = screening.drop_duplicates("application_no", keep="last")  # the last judgement wins
+    valid = latest[latest["relevance"] == "valid"][["application_no", "tech_code"]]
     df = candidates.merge(valid, on="application_no", how="inner")
     if rank is not None and "rank_score" in rank:
         df = df.merge(rank[["application_no", "rank_score"]], on="application_no", how="left")
@@ -66,6 +67,8 @@ def enrich(client, numbers: list[str], out_dir: Path, budget: int | None = None,
         if path.exists():
             d = json.loads(path.read_text(encoding="utf-8"))
             d["independent_claims"] = independent_claims(d.get("claims", []))  # rules may have improved
+            if d.get("claims") and not (ft_dir / f"{no}.txt").exists():
+                (ft_dir / f"{no}.txt").write_text("\n".join(d["claims"]), encoding="utf-8")
         else:
             if budget is not None and client.network_calls - start + 2 > budget:
                 log(f"[enrich] call budget {budget} reached after {i - 1} documents")
@@ -80,7 +83,8 @@ def enrich(client, numbers: list[str], out_dir: Path, budget: int | None = None,
             "application_no": no,
             "claim_count": d.get("claim_count", 0),
             "independent_claims": len(d.get("independent_claims", [])),
-            "forward_citations": len(d.get("citing", [])),
+            "forward_citations": len({c.get("citing_application_no") for c in d.get("citing", [])
+                                      if c.get("citing_application_no")}),
             "backward_citations": len(d.get("prior_art", [])),
             "examiner_citations": sum(1 for p in d.get("prior_art", []) if p.get("examiner")),
             "family_size": len(d.get("family", [])),

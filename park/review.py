@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from .checks import _claim_text, _squash
+from .checks import _squash, load_claims
 from .kipris import independent_claims
 from .schema import read_csv, write_csv
 
@@ -33,7 +33,9 @@ def signals(d: Path) -> pd.DataFrame:
     e = read_csv(d / "enrich.csv")
     df = s.merge(e, on="application_no", how="inner")
     fc = pd.to_numeric(df["forward_citations"], errors="coerce").fillna(0)
-    df["forward_pct"] = (fc.rank(pct=True) * 100).round(0).astype(int)
+    # top-x% among enriched shortlist documents; omitted when too few are enriched to compare
+    df["forward_top_pct"] = ((fc.rank(ascending=False, method="min") / len(df)) * 100).round(0).astype(int) \
+        if len(df) >= 20 else -1
     return df
 
 
@@ -57,7 +59,9 @@ def make_batches(d: Path, size: int = 15) -> int:
             blocks.append(
                 f"### {r['application_no']}\n- 명칭: {r['title']}\n- 출원인: {r['applicants']}\n"
                 f"- 기술분류: {r['tech_code']} · 상태: {r['status']} ({r['register_status']}) · 출원일: {r['application_date']}\n"
-                f"- 신호: 피인용 {r['forward_citations']}건 (압축 목록 내 상위 {100 - int(r['forward_pct'])}%), "
+                f"- 신호: 피인용 {r['forward_citations']}건"
+                + (f" (압축 목록 내 상위 {int(r['forward_top_pct'])}%)" if int(r["forward_top_pct"]) >= 0 else "")
+                + ", "
                 f"청구항 {r['claim_count']}개 (독립항 {r['independent_claims']}), 패밀리 {r['family_size']}건\n"
                 f"- 독립청구항:\n{indep}\n")
         (tdir / f"key_{n:03d}.md").write_text(f"# key_{n:03d}\n\n" + "\n".join(blocks), encoding="utf-8")
@@ -76,20 +80,35 @@ def merge(d: Path) -> tuple[pd.DataFrame, list[str]]:
                     errors.append(f"{f.name}:{n}: invalid JSON ({e})")
     df = pd.DataFrame(rows).reindex(columns=REVIEW_COLUMNS).fillna("").astype(str)
     df = df.drop_duplicates("application_no", keep="last").reset_index(drop=True)
-    for i, r in df.iterrows():
-        where = f"{r['application_no']}"
+    bad: set[str] = set()
+
+    def fail(no: str, msg: str):
+        errors.append(f"{no}: {msg}")
+        bad.add(no)
+
+    for _, r in df.iterrows():
+        no = r["application_no"]
         if r["importance"] not in IMPORTANCE_VALUES:
-            errors.append(f"{where}: importance '{r['importance']}' not in {sorted(IMPORTANCE_VALUES)}")
-        ft = d / "fulltext" / f"{r['application_no']}.txt"
-        if not ft.exists():
-            errors.append(f"{where}: no claims text (fulltext/) — run `park enrich`")
+            fail(no, f"importance '{r['importance']}' not in {sorted(IMPORTANCE_VALUES)}")
+        claims = load_claims(d, no)
+        quote = _squash(r["evidence_quote"])
+        if claims is None:
+            if quote:
+                fail(no, "no claims text (details/ or fulltext/) — run `park enrich`")
+            continue
+        if not quote:
+            if r["importance"] != "일반":
+                fail(no, "no evidence_quote — only '일반' may be given without a claim quote")
             continue
         m = re.search(r"\d+", r["evidence_location"])
-        text = ft.read_text(encoding="utf-8")
-        part = _claim_text(text, int(m.group(0))) if m else text
+        if not m:
+            fail(no, "evidence_location must name one claim, e.g. '청구항 1'")
+            continue
+        part = claims.get(int(m.group(0)))
         if part is None:
-            errors.append(f"{where}: {r['evidence_location']} not found among the claims")
-        elif len(_squash(r["evidence_quote"])) < 8 or _squash(r["evidence_quote"]) not in _squash(part):
-            errors.append(f"{where}: evidence_quote not found verbatim in {r['evidence_location'] or 'the claims'}")
-    write_csv(df, d / "key_review.csv")
+            fail(no, f"{r['evidence_location']} not found among the claims")
+        elif len(quote) < 8 or quote not in _squash(part):
+            fail(no, f"evidence_quote not found verbatim in {r['evidence_location']}")
+    # only verified judgements reach key_review.csv (and therefore the report)
+    write_csv(df[~df["application_no"].isin(bad)], d / "key_review.csv")
     return df, errors

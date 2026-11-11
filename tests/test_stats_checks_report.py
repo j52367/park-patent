@@ -19,7 +19,8 @@ def test_unpublished_window_and_full_counting():
     s = stats.compute(c, None, as_of="2025-06-30")
     assert s["meta"]["unpublished_cutoff"] == "2023-12-30"
     flags = {r["year"]: r["incomplete"] for r in s["yearly"]}
-    assert flags[2020] is False and flags[2023] is True and flags[2024] is True
+    assert flags[2020] is False and flags[2024] is True
+    assert flags[2023] is False  # only 1 day of 2023 falls inside the window (< INCOMPLETE_MIN_DAYS)
     top = {a["name"]: a["count"] for a in s["applicants_top"]}
     assert top == {"A": 2, "B": 1}
     assert s["meta"]["basis"].startswith("all-candidates")
@@ -139,7 +140,7 @@ def test_batches_merge_and_audit(tmp_path):
     assert [p.name for p in todo] == ["r2_001.md", "r2_002.md"]
     assert "129건" in todo[1].read_text(encoding="utf-8")  # 529 = 400 + 129
     main(["audit-sample", str(d), "--n", "3"])
-    assert "3건 / 노이즈 5건" in (d / "AUDIT_SAMPLE.md").read_text(encoding="utf-8")
+    assert "노이즈 5건 중 무작위 3건" in (d / "AUDIT_SAMPLE.md").read_text(encoding="utf-8")
 
 
 def test_map_rerun_removes_stale_charts(tmp_path):

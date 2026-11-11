@@ -37,7 +37,9 @@ allowed-tools: Read, Write, Glob, Bash(park *), Bash(python -m park *)
 park map <DIR> --as-of <기준일>
 ```
 
-- 기준일: 데이터를 수집한 날. 비우면 candidates.csv의 `status_as_of` 최댓값을 쓴다.
+- 기준일: 데이터를 수집한 날. 미공개 구간(기준일 전 18개월)을 정하는 데 쓴다. 비우면 candidates.csv의 `status_as_of` 최댓값을 쓴다.
+  `park ingest --as-of`(권리 상태를 관측한 날)와 이름은 같지만 뜻이 다르다. 보통은 같은 날이다.
+- 연도의 30일 이상이 미공개 구간에 들면 그 연도를 미완(`incomplete`)으로 표시한다. 하루 이틀 걸친 연도는 표시하지 않는다.
 - `screening.csv` 파일이 있으면 유효특허만 센다 (판정이 0건이면 0건). 파일이 없으면 전체 후보를 센다. 어느 쪽인지는 `meta.basis`에 표시된다.
 - 다시 실행하면 이전 차트는 지워지고 현재 통계로 다시 그린다.
 - `country` 열이 2개국 이상이면 국가별 건수, 국가 × 연도, 국가 × 기술 분류 차트가 추가된다. 출원인 막대에는 출원인 국적이 붙는다.

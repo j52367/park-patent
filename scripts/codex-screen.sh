@@ -5,7 +5,7 @@
 #
 # Screens every screening/todo/*.md that has no screening/done/<name>.jsonl yet, so it can simply be
 # re-run after an interruption (e.g. a ChatGPT usage limit). Batches named recheck_* get the
-# ':recheck' suffix and tail_audit* the matching ':tail-audit[-rN]' suffix on screened_by.
+# ':recheck' suffix, tail_audit* the matching ':tail-audit[-rN]' suffix and noise_audit ':noise-audit' on screened_by.
 # Then run:  park merge-screening <analysis-dir>   (mode=review: park merge-review <analysis-dir>)
 #
 # Patent text is sent to OpenAI. Do not use this for confidential input without permission.
@@ -36,7 +36,7 @@ pending=(); special=()
 for f in "$work"/todo/*.md; do
   b=$(basename "$f" .md)
   [ -f "$work/done/$b.jsonl" ] && continue
-  case "$b" in recheck_*|tail_audit*) special+=("$f");; *) pending+=("$f");; esac
+  case "$b" in recheck_*|tail_audit*|noise_audit) special+=("$f");; *) pending+=("$f");; esac
 done
 echo "pending batches: $(( ${#pending[@]} + ${#special[@]} ))"
 
@@ -45,6 +45,7 @@ for f in "${special[@]}"; do
   case "$b" in
     recheck_*) run "$b" ":recheck" "$f" & ;;
     tail_audit) run "$b" ":tail-audit" "$f" & ;;
+    noise_audit) run "$b" ":noise-audit" "$f" & ;;
     tail_audit_r*) run "$b" ":tail-audit-r${b#tail_audit_r}" "$f" & ;;
   esac
 done

@@ -141,7 +141,7 @@ def test_claim_split_and_chart_merge(tmp_path):
         {"prior_art": earlier, "element": "E1", "status": "개시", "location": "청구항 1", "quote": "탄성층과 상기 탄성층 아래의"},
         {"prior_art": earlier, "element": "E0", "status": "개시", "location": "청구항 3", "quote": "탄성층과 상기 탄성층"},  # quote is from claim 1
         {"prior_art": earlier, "summary": "s", "novelty": "유지"},
-        {"combination": [earlier, target], "covers": {}, "motivation": "m", "weakness": "w"},
+        {"combination": [earlier], "covers": {}, "motivation": "m", "weakness": "w"},
     ]
     (out / "done.jsonl").write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows), encoding="utf-8")
     summary, errors = chart.merge(d, out)
